@@ -10,6 +10,14 @@ fn main() {
     // Emit cfg flags for each JWT circuit size variant that has been compiled.
     // The witness!() macro in prepare_circuit.rs uses these flags to conditionally
     // include the witness-generation function for each compiled size.
+
+    // Base (default) circuit: jwt.cpp → has_circuit_base
+    println!("cargo::rustc-check-cfg=cfg(has_circuit_base)");
+    if circuits_dir.join("jwt.cpp").exists() {
+        println!("cargo:rustc-cfg=has_circuit_base");
+        println!("cargo:warning=Found compiled circuit: jwt.cpp — enabling base circuit support");
+    }
+
     for size in ["1k", "2k", "4k", "8k"] {
         // Declare the cfg key so rustc doesn't warn about unknown cfg names.
         println!("cargo::rustc-check-cfg=cfg(has_circuit_{})", size);
