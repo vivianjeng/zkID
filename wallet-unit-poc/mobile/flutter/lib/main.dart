@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -8,6 +9,7 @@ import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.da
     show
         BenchmarkResults,
         ProofResult,
+        generatePrepareInput,
         generateSharedBlinds,
         provePrepare,
         proveShow,
@@ -18,6 +20,17 @@ import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.da
         setupShowKeys,
         verifyPrepare,
         verifyShow;
+
+// Real vc+sd-jwt credential — Taiwan government wallet demo, alg ES256, no disclosures.
+// Issuer public key "key-1" coordinates (decimal); verified against the live JWK Set.
+const String _kIssuerPubkeyX =
+    '53578245562568858090497762971050088637552636662548898700080252253957930675571';
+const String _kIssuerPubkeyY =
+    '94717717123739987908966931526384127659809793164315839803856846695569747893398';
+const String _kCredentialJwt =
+    'eyJqa3UiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9rZXlzIiwia2lkIjoia2V5LTEiLCJ0eXAiOiJ2YytzZC1qd3QiLCJhbGciOiJFUzI1NiJ9'
+    '.eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDI0b3g3cVp4NmJ2TndENzNja2lXZkRCQzV5NHpnckNMdVRuMXBNQnpGWFBIdHVXUDEyY1lQRmRSdjQ5MlE4WDFYZVoyeVg3U1pZWDloV1RaV0F2QXpUWFMydkJIakI2QnhxOGZGeEd5ZTRTd1dtcWdaODZRU3lkd2hoRHU5eTZLV2dlZDlhVkFlTFpjbUNXTHFzZ21CVUJDaG50SGdvSHhtczVadXZDTFUiLCJuYmYiOjE3Nzg1MTUyMDAsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUzWkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJqd2siOnsieSI6Ilpza1oyQ2dmWWpDZWpDaUFNdzNnZ3JReHZ2TlJNLUpOTEtWU0xEcjNjdWsiLCJ4IjoiVkZCd1k3cFg3ZEI0RDF5YXNwYVRIM0luTElLeURCUUU5OFRSVzNISGRmbyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYifX0sImV4cCI6MTc3OTIwNjM5OSwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwidHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX2RlbW8iXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIsImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfZGVtby9yMCMxOCIsInN0YXR1c0xpc3RJbmRleCI6IjE4Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF9kZW1vL3IwIiwic3RhdHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL2RlbW8vVjEvZjFlYTllMTQtNzdhNy00MzRlLWI3MDEtZjhkYjViMGMzMDJkIiwidHlwZSI6Ikpzb25TY2hlbWEifSwiY3JlZGVudGlhbFN1YmplY3QiOnsiX3NkIjpbIjdqcnJDdFlsamJYQ3ZvckpZUXlyNnNZVDVVTzBoYW9ZT1BnUGtGc0U4WkkiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiR1c4N1dZOTAiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVkZW50aWFsLzExMzdkN2RmLTU3YzgtNDU3NS05NjViLTgxZjNkOTE4NTg4OSJ9'
+    '.uaSHN7nXORtfcU9PjSaDPdEZ7kqvFbz5sZsqjT2iIFCMPVwgSp8OcoqUSYqu2_TLpYVEk3niIGHp5aZoBwmGHw';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -155,6 +168,10 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   bool _workflowRunning = false;
   String? _currentWorkflowStep;
 
+  bool _generatingInput = false;
+  String? _prepareInputStatus;
+  String? _prepareInputError;
+
   Future<String> _getDocumentsPath() async {
     final dir = await getApplicationDocumentsDirectory();
     return '${dir.path}/circom';
@@ -247,6 +264,38 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
           verifyResult: ok,
           clientTimingMs: DateTime.now().difference(t).inMilliseconds,
         );
+    }
+  }
+
+  /// Calls [generatePrepareInput] with the hardcoded real credential and writes
+  /// the result to `{docs}/prepare_input.json`, replacing the bundled test input.
+  Future<void> _generateAndWritePrepareInput() async {
+    setState(() {
+      _generatingInput = true;
+      _prepareInputStatus = null;
+      _prepareInputError = null;
+    });
+    try {
+      final docs = await _getDocumentsPath();
+      final jsonStr = await generatePrepareInput(
+        jwt: _kCredentialJwt,
+        issuerPubkeyX: _kIssuerPubkeyX,
+        issuerPubkeyY: _kIssuerPubkeyY,
+      );
+      await File('$docs/prepare_input.json').writeAsString(jsonStr);
+      final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+      setState(() {
+        _prepareInputStatus =
+            'messageLength=${data['messageLength']}  '
+            'periodIndex=${data['periodIndex']}  '
+            'matchesCount=${data['matchesCount']}';
+        _generatingInput = false;
+      });
+    } catch (e) {
+      setState(() {
+        _prepareInputError = e.toString();
+        _generatingInput = false;
+      });
     }
   }
 
@@ -439,6 +488,106 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
                   ),
                 ),
               ),
+
+            const SizedBox(height: 16),
+
+            // ── Generate Circuit Inputs ────────────────────────────────────
+            Card(
+              elevation: 4,
+              color: Colors.cyan.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.credit_card, color: Colors.cyan.shade700),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Generate Circuit Inputs',
+                          style: TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Generate prepare_input.json from the real vc+sd-jwt credential '
+                      '(Taiwan gov wallet demo, alg ES256). '
+                      'Run this before proving to use the real credential instead of the bundled test input.',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: (_isOperating || _generatingInput)
+                            ? null
+                            : _generateAndWritePrepareInput,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.cyan.shade700,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.all(14),
+                        ),
+                        icon: _generatingInput
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                      Colors.white),
+                                ),
+                              )
+                            : const Icon(Icons.upload_file),
+                        label: Text(_generatingInput
+                            ? 'Generating prepare_input.json…'
+                            : 'Generate Prepare Input (Real Credential)'),
+                      ),
+                    ),
+                    if (_prepareInputStatus != null) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          const Icon(Icons.check_circle,
+                              color: Colors.green, size: 16),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              _prepareInputStatus!,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.green.shade700,
+                                  fontFamily: 'monospace'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (_prepareInputError != null) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.error,
+                              color: Colors.red, size: 16),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              _prepareInputError!,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.red.shade700),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
 
             const SizedBox(height: 16),
 

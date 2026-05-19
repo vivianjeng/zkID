@@ -655,6 +655,345 @@ fn get_proof_size(proof_path: impl AsRef<std::path::Path>) -> Result<u64, ZkProo
 }
 
 // ============================================================================
+// Circuit Input Generation
+// ============================================================================
+
+/// Decode a base64url string (no-padding variant) to raw bytes.
+fn b64url_decode(s: &str) -> Vec<u8> {
+    let decode_char = |c: u8| -> u8 {
+        match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => 255,
+        }
+    };
+    let mut result = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &b in s.as_bytes() {
+        let val = decode_char(b);
+        if val == 255 {
+            continue;
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    result
+}
+
+/// Apply standard SHA-256 message padding to `msg`, producing a buffer of
+/// `max_len` bytes with `padded_block_len` significant bytes.
+fn sha256_pad(msg: &[u8], max_len: usize) -> Result<(Vec<u8>, usize), ZkProofError> {
+    let msg_len = msg.len();
+    let bit_len = (msg_len as u64) * 8;
+    let padded_len = ((msg_len + 9 + 63) / 64) * 64;
+    if padded_len > max_len {
+        return Err(ZkProofError::InvalidInput {
+            message: format!(
+                "SHA-256 padded length {} exceeds circuit maxMessageLength {}",
+                padded_len, max_len
+            ),
+        });
+    }
+    let mut padded = vec![0u8; max_len];
+    padded[..msg_len].copy_from_slice(msg);
+    padded[msg_len] = 0x80;
+    padded[padded_len - 8..padded_len].copy_from_slice(&bit_len.to_be_bytes());
+    Ok((padded, padded_len))
+}
+
+/// Generate the Prepare (JWT) circuit input JSON for a `vc+sd-jwt` credential.
+///
+/// Returns a JSON string ready to write to `prepare_input.json` and pass to
+/// [`prove_prepare`].  Circuit params are fixed at the **2k** variant:
+/// `maxMessageLength=2048`, `maxMatches=4`, `maxSubstringLength=50`,
+/// `maxClaims=2`, `maxClaimLength=128`.
+///
+/// Parameters:
+/// - `jwt`: compact JWT (`header.payload.signature`, SD-JWT `~disclosure~` suffix is stripped)
+/// - `issuer_pubkey_x`: issuer P-256 X coordinate as a big-endian decimal string
+/// - `issuer_pubkey_y`: issuer P-256 Y coordinate as a big-endian decimal string
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn generate_prepare_input(
+    jwt: String,
+    issuer_pubkey_x: String,
+    issuer_pubkey_y: String,
+) -> Result<String, ZkProofError> {
+    use num_bigint::BigUint;
+    use std::str::FromStr;
+
+    const MAX_MSG_LEN: usize = 2048;
+    const MAX_MATCHES: usize = 4;
+    const MAX_SUBSTR_LEN: usize = 50;
+    const MAX_CLAIMS: usize = 2; // MAX_MATCHES - 2
+    const MAX_CLAIM_LEN: usize = 128;
+    const P256_N: &str =
+        "115792089210356248762697446949407573529996955224135760342422259061068512044369";
+
+    // Split header.payload.signature; strip optional ~disclosure~ suffix
+    let dot1 = jwt.find('.').ok_or_else(|| ZkProofError::InvalidInput {
+        message: "JWT is missing the first '.' separator".into(),
+    })?;
+    let rest = &jwt[dot1 + 1..];
+    let dot2 = rest.find('.').ok_or_else(|| ZkProofError::InvalidInput {
+        message: "JWT is missing the second '.' separator".into(),
+    })?;
+    let header_b64 = &jwt[..dot1];
+    let payload_b64 = &rest[..dot2];
+    let sig_b64 = rest[dot2 + 1..].split('~').next().unwrap_or("");
+
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+    let (padded_msg, padded_len) = sha256_pad(signing_input.as_bytes(), MAX_MSG_LEN)?;
+
+    // Decode compact ES256 signature: 64 bytes, r || s (each 32-byte big-endian)
+    let sig_bytes = b64url_decode(sig_b64);
+    if sig_bytes.len() != 64 {
+        return Err(ZkProofError::InvalidInput {
+            message: format!(
+                "Expected 64-byte compact ES256 signature, got {}",
+                sig_bytes.len()
+            ),
+        });
+    }
+    let sig_r = BigUint::from_bytes_be(&sig_bytes[..32]);
+    let sig_s = BigUint::from_bytes_be(&sig_bytes[32..64]);
+    let n = BigUint::from_str(P256_N).unwrap();
+    // s⁻¹ mod n via Fermat's little theorem (n is prime)
+    let sig_s_inv = sig_s.modpow(&(&n - BigUint::from(2u32)), &n);
+
+    // Decode payload to locate pattern positions
+    let decoded_payload_bytes = b64url_decode(payload_b64);
+    let decoded_payload =
+        std::str::from_utf8(&decoded_payload_bytes).map_err(|e| ZkProofError::InvalidInput {
+            message: format!("JWT payload is not valid UTF-8: {}", e),
+        })?;
+
+    // The first two match slots always extract the device binding key
+    let fixed_patterns: &[&str] = &[r#""x":""#, r#""y":""#];
+    let matches_count = fixed_patterns.len();
+    let mut match_substrings: Vec<serde_json::Value> = Vec::new();
+    let mut match_lengths: Vec<usize> = Vec::new();
+    let mut match_indices: Vec<usize> = Vec::new();
+
+    for pat in fixed_patterns {
+        let idx =
+            decoded_payload
+                .find(pat)
+                .ok_or_else(|| ZkProofError::InvalidInput {
+                    message: format!("Pattern {:?} not found in JWT payload", pat),
+                })?;
+        let pat_bytes = pat.as_bytes();
+        let mut sub: Vec<serde_json::Value> =
+            pat_bytes.iter().map(|b| serde_json::json!(b.to_string())).collect();
+        sub.resize(MAX_SUBSTR_LEN, serde_json::json!("0"));
+        match_substrings.push(serde_json::Value::Array(sub));
+        match_lengths.push(pat_bytes.len());
+        match_indices.push(idx);
+    }
+    // Pad remaining match slots
+    while match_substrings.len() < MAX_MATCHES {
+        let zeros: Vec<serde_json::Value> =
+            (0..MAX_SUBSTR_LEN).map(|_| serde_json::json!("0")).collect();
+        match_substrings.push(serde_json::Value::Array(zeros));
+        match_lengths.push(0);
+        match_indices.push(0);
+    }
+
+    // No disclosures → all claim slots are zero-padded
+    let mut claims: Vec<serde_json::Value> = Vec::new();
+    let mut claim_lengths: Vec<serde_json::Value> = Vec::new();
+    let mut decode_flags: Vec<u8> = Vec::new();
+    let mut claim_formats: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..MAX_CLAIMS {
+        let zeros: Vec<serde_json::Value> =
+            (0..MAX_CLAIM_LEN).map(|_| serde_json::json!("0")).collect();
+        claims.push(serde_json::Value::Array(zeros));
+        claim_lengths.push(serde_json::json!("0"));
+        decode_flags.push(0u8);
+        claim_formats.push(serde_json::json!("1")); // uint (default)
+    }
+
+    let message: Vec<serde_json::Value> = padded_msg
+        .iter()
+        .map(|b| serde_json::json!(b.to_string()))
+        .collect();
+
+    let val = serde_json::json!({
+        "sig_r": sig_r.to_string(),
+        "sig_s_inverse": sig_s_inv.to_string(),
+        "pubKeyX": issuer_pubkey_x,
+        "pubKeyY": issuer_pubkey_y,
+        "message": message,
+        "messageLength": padded_len,
+        "periodIndex": dot1,
+        "matchesCount": matches_count,
+        "matchSubstring": match_substrings,
+        "matchLength": match_lengths,
+        "matchIndex": match_indices,
+        "claims": claims,
+        "claimLengths": claim_lengths,
+        "decodeFlags": decode_flags,
+        "claimFormats": claim_formats,
+    });
+
+    serde_json::to_string(&val).map_err(|e| ZkProofError::IoError {
+        message: format!("Failed to serialize prepare input JSON: {}", e),
+    })
+}
+
+/// Generate the Show circuit input JSON for a credential presentation.
+///
+/// Returns a JSON string ready to write to `show_input.json` and pass to
+/// [`prove_show`].  Circuit params are fixed at the **2k** variant:
+/// `nClaims=2`, `maxPredicates=2`, `maxLogicTokens=8`.
+///
+/// Parameters:
+/// - `jwt`: compact JWT — used to extract `cnf.jwk` device key coordinates
+/// - `device_signature`: base64url compact ES256 signature over `SHA-256(nonce)`
+/// - `nonce`: the UTF-8 string that was signed by the device key
+/// - `claim_values`: normalised claim values from the Prepare circuit output
+///   (decimal strings); padded with `"0"` to `nClaims=2`
+/// - `predicate_len`: number of active predicates (≤ 2)
+/// - `predicate_claim_refs`: which claim index each predicate evaluates
+/// - `predicate_ops`: operation code per predicate (0=LE, 1=GE, 2=EQ)
+/// - `predicate_rhs_is_ref`: 0 = literal RHS, 1 = RHS references another claim
+/// - `predicate_rhs_values`: RHS decimal string values
+/// - `expr_len`: number of active logic expression tokens (≤ 8)
+/// - `token_types`: 0=REF, 1=AND, 2=OR, 3=NOT
+/// - `token_values`: token operand values
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn generate_show_input(
+    jwt: String,
+    device_signature: String,
+    nonce: String,
+    claim_values: Vec<String>,
+    predicate_len: u64,
+    predicate_claim_refs: Vec<u64>,
+    predicate_ops: Vec<u64>,
+    predicate_rhs_is_ref: Vec<u64>,
+    predicate_rhs_values: Vec<String>,
+    expr_len: u64,
+    token_types: Vec<u64>,
+    token_values: Vec<u64>,
+) -> Result<String, ZkProofError> {
+    use num_bigint::BigUint;
+    use sha2::{Digest, Sha256};
+    use std::str::FromStr;
+
+    const N_CLAIMS: usize = 2;
+    const MAX_PREDICATES: usize = 2;
+    const MAX_LOGIC_TOKENS: usize = 8;
+    const P256_N: &str =
+        "115792089210356248762697446949407573529996955224135760342422259061068512044369";
+
+    let n = BigUint::from_str(P256_N).unwrap();
+
+    // ── Device key from cnf.jwk ──────────────────────────────────────────────
+    let dot1 = jwt.find('.').ok_or_else(|| ZkProofError::InvalidInput {
+        message: "JWT missing first '.'".into(),
+    })?;
+    let rest = &jwt[dot1 + 1..];
+    let dot2 = rest.find('.').ok_or_else(|| ZkProofError::InvalidInput {
+        message: "JWT missing second '.'".into(),
+    })?;
+    let payload_b64 = &rest[..dot2];
+
+    let decoded_payload_bytes = b64url_decode(payload_b64);
+    let decoded_payload =
+        std::str::from_utf8(&decoded_payload_bytes).map_err(|e| ZkProofError::InvalidInput {
+            message: format!("JWT payload not valid UTF-8: {}", e),
+        })?;
+
+    let payload_json: serde_json::Value =
+        serde_json::from_str(decoded_payload).map_err(|e| ZkProofError::InvalidInput {
+            message: format!("Failed to parse JWT payload JSON: {}", e),
+        })?;
+
+    let dev_x_b64 = payload_json["cnf"]["jwk"]["x"]
+        .as_str()
+        .ok_or_else(|| ZkProofError::InvalidInput {
+            message: "cnf.jwk.x not found in JWT payload".into(),
+        })?;
+    let dev_y_b64 = payload_json["cnf"]["jwk"]["y"]
+        .as_str()
+        .ok_or_else(|| ZkProofError::InvalidInput {
+            message: "cnf.jwk.y not found in JWT payload".into(),
+        })?;
+
+    let dev_x_bytes = b64url_decode(dev_x_b64);
+    let dev_y_bytes = b64url_decode(dev_y_b64);
+    let device_key_x = BigUint::from_bytes_be(&dev_x_bytes);
+    let device_key_y = BigUint::from_bytes_be(&dev_y_bytes);
+
+    // ── Device signature ─────────────────────────────────────────────────────
+    let sig_bytes = b64url_decode(&device_signature);
+    if sig_bytes.len() != 64 {
+        return Err(ZkProofError::InvalidInput {
+            message: format!(
+                "Expected 64-byte compact ES256 device signature, got {}",
+                sig_bytes.len()
+            ),
+        });
+    }
+    let sig_r = BigUint::from_bytes_be(&sig_bytes[..32]);
+    let sig_s = BigUint::from_bytes_be(&sig_bytes[32..64]);
+    let sig_s_inv = sig_s.modpow(&(&n - BigUint::from(2u32)), &n);
+
+    // ── Message hash: SHA-256(nonce) mod n ───────────────────────────────────
+    let hash_bytes = Sha256::digest(nonce.as_bytes());
+    let msg_hash = BigUint::from_bytes_be(&hash_bytes) % &n;
+
+    // ── Pad arrays to circuit dimensions ────────────────────────────────────
+    let pad_str = |v: &[String], len: usize| -> Vec<serde_json::Value> {
+        (0..len)
+            .map(|i| serde_json::json!(v.get(i).map(|s| s.as_str()).unwrap_or("0")))
+            .collect()
+    };
+    let pad_u64 = |v: &[u64], len: usize, default: u64| -> Vec<serde_json::Value> {
+        (0..len)
+            .map(|i| serde_json::json!(v.get(i).copied().unwrap_or(default).to_string()))
+            .collect()
+    };
+
+    let claims_out = pad_str(&claim_values, N_CLAIMS);
+    let pred_claim_refs = pad_u64(&predicate_claim_refs, MAX_PREDICATES, 0);
+    let pred_ops = pad_u64(&predicate_ops, MAX_PREDICATES, 2); // EQ default
+    let pred_rhs_is_ref = pad_u64(&predicate_rhs_is_ref, MAX_PREDICATES, 0);
+    let pred_rhs_values = pad_str(&predicate_rhs_values, MAX_PREDICATES);
+    let tok_types = pad_u64(&token_types, MAX_LOGIC_TOKENS, 0);
+    let tok_values = pad_u64(&token_values, MAX_LOGIC_TOKENS, 0);
+
+    let val = serde_json::json!({
+        "deviceKeyX": device_key_x.to_string(),
+        "deviceKeyY": device_key_y.to_string(),
+        "sig_r": sig_r.to_string(),
+        "sig_s_inverse": sig_s_inv.to_string(),
+        "messageHash": msg_hash.to_string(),
+        "predicateLen": predicate_len.to_string(),
+        "claimValues": claims_out,
+        "predicateClaimRefs": pred_claim_refs,
+        "predicateOps": pred_ops,
+        "predicateRhsIsRef": pred_rhs_is_ref,
+        "predicateRhsValues": pred_rhs_values,
+        "tokenTypes": tok_types,
+        "tokenValues": tok_values,
+        "exprLen": expr_len.to_string(),
+    });
+
+    serde_json::to_string(&val).map_err(|e| ZkProofError::IoError {
+        message: format!("Failed to serialize show input JSON: {}", e),
+    })
+}
+
+// ============================================================================
 // Legacy Test Function
 // ============================================================================
 
@@ -733,7 +1072,7 @@ mod e2e_tests {
     ///     jwt_input.json                        ← 2k JWT inputs (for run_complete_benchmark default)
     ///
     /// Returns the documents_path string.
-    fn setup_mobile_docs(path: &PathBuf) -> String {
+    fn setup_mobile_docs(path: &std::path::Path) -> String {
         let docs = path.join("circom");
         let circom = circom_root();
 
@@ -778,7 +1117,7 @@ mod e2e_tests {
     fn e2e_full_workflow() {
         let temp = tempfile::tempdir().expect("create temp dir");
 
-        let docs = setup_mobile_docs(&temp);
+        let docs = setup_mobile_docs(temp.path());
 
         // Step 1: Setup Prepare keys
         let r = setup_prepare_keys(docs.clone());
@@ -848,12 +1187,199 @@ mod e2e_tests {
         );
     }
 
+    // =========================================================================
+    // Real-credential prove tests
+    // =========================================================================
+
+    /// Full JWT credential issued by the Taiwan government wallet demo issuer.
+    const CREDENTIAL_JWT: &str =
+        "eyJqa3UiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9rZXlzIiwia2lkIjoia2V5LTEiLCJ0eXAiOiJ2YytzZC1qd3QiLCJhbGciOiJFUzI1NiJ9\
+         .eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDI0b3g3cVp4NmJ2TndENzNja2lXZkRCQzV5NHpnckNMdVRuMXBNQnpGWFBIdHVXUDEyY1lQRmRSdjQ5MlE4WDFYZVoyeVg3U1pZWDloV1RaV0F2QXpUWFMydkJIakI2QnhxOGZGeEd5ZTRTd1dtcWdaODZRU3lkd2hoRHU5eTZLV2dlZDlhVkFlTFpjbUNXTHFzZ21CVUJDaG50SGdvSHhtczVadXZDTFUiLCJuYmYiOjE3Nzg1MTUyMDAsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUzWkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJqd2siOnsieSI6Ilpza1oyQ2dmWWpDZWpDaUFNdzNnZ3JReHZ2TlJNLUpOTEtWU0xEcjNjdWsiLCJ4IjoiVkZCd1k3cFg3ZEI0RDF5YXNwYVRIM0luTElLeURCUUU5OFRSVzNISGRmbyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYifX0sImV4cCI6MTc3OTIwNjM5OSwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwidHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX2RlbW8iXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIsImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfZGVtby9yMCMxOCIsInN0YXR1c0xpc3RJbmRleCI6IjE4Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF9kZW1vL3IwIiwic3RhdHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL2RlbW8vVjEvZjFlYTllMTQtNzdhNy00MzRlLWI3MDEtZjhkYjViMGMzMDJkIiwidHlwZSI6Ikpzb25TY2hlbWEifSwiY3JlZGVudGlhbFN1YmplY3QiOnsiX3NkIjpbIjdqcnJDdFlsamJYQ3ZvckpZUXlyNnNZVDVVTzBoYW9ZT1BnUGtGc0U4WkkiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiR1c4N1dZOTAiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVkZW50aWFsLzExMzdkN2RmLTU3YzgtNDU3NS05NjViLTgxZjNkOTE4NTg4OSJ9\
+         .uaSHN7nXORtfcU9PjSaDPdEZ7kqvFbz5sZsqjT2iIFCMPVwgSp8OcoqUSYqu2_TLpYVEk3niIGHp5aZoBwmGHw";
+
+    /// Issuer public key (kid: "key-1") fetched from https://issuer-vc.wallet.gov.tw/api/keys.
+    /// x = base64url_decode("dnQ2W9ZTsILYac3XdcvxrYNgIgjSkGJUMecMXVJk7XM") → big-endian uint
+    /// y = base64url_decode("0WhT_VgvnhNNj9aabTn4E4enR-iqbCrQtY9UWqD4XJY") → big-endian uint
+    const ISSUER_PUBKEY_X: &str =
+        "53578245562568858090497762971050088637552636662548898700080252253957930675571";
+    const ISSUER_PUBKEY_Y: &str =
+        "94717717123739987908966931526384127659809793164315839803856846695569747893398";
+
+    /// Verifies that `generate_prepare_input` produces a correctly structured JSON.
+    #[test]
+    fn test_generate_prepare_input_structure() {
+        let json_str = generate_prepare_input(
+            CREDENTIAL_JWT.to_string(),
+            ISSUER_PUBKEY_X.to_string(),
+            ISSUER_PUBKEY_Y.to_string(),
+        )
+        .expect("generate_prepare_input failed");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&json_str).expect("output is valid JSON");
+
+        // message must be 2048 elements
+        assert_eq!(v["message"].as_array().unwrap().len(), 2048);
+        // SHA-256 padded length for a 1853-byte signing input = 1920
+        assert_eq!(v["messageLength"].as_u64().unwrap(), 1920);
+        // Header is 128 base64url chars → period at index 128
+        assert_eq!(v["periodIndex"].as_u64().unwrap(), 128);
+        // Always 2 built-in patterns
+        assert_eq!(v["matchesCount"].as_u64().unwrap(), 2);
+        // matchSubstring padded to 4 slots of 50 elements each
+        assert_eq!(v["matchSubstring"].as_array().unwrap().len(), 4);
+        assert_eq!(v["matchSubstring"][0].as_array().unwrap().len(), 50);
+        // '"x":"' pattern bytes: [34, 120, 34, 58, 34]
+        assert_eq!(v["matchSubstring"][0][0].as_str().unwrap(), "34");
+        assert_eq!(v["matchSubstring"][0][1].as_str().unwrap(), "120");
+        // Signature fields must be non-empty non-zero strings
+        assert!(!v["sig_r"].as_str().unwrap().is_empty());
+        assert_ne!(v["sig_r"].as_str().unwrap(), "0");
+        assert!(!v["sig_s_inverse"].as_str().unwrap().is_empty());
+    }
+
+    /// Verifies that `generate_show_input` produces a correctly structured JSON
+    /// and correctly extracts the device key from CREDENTIAL_JWT's cnf.jwk.
+    ///
+    /// Uses a placeholder zero-signature (64 A bytes in base64url); this is
+    /// structurally valid but would fail circuit witness generation.
+    #[test]
+    fn test_generate_show_input_structure() {
+        // 64 zero bytes in base64url (no padding): 86 'A' characters
+        let zero_sig = "A".repeat(86);
+
+        let json_str = generate_show_input(
+            CREDENTIAL_JWT.to_string(),
+            zero_sig,
+            "test-nonce".to_string(),
+            vec!["0".to_string(), "0".to_string()], // claim_values
+            0,                                       // predicate_len
+            vec![],                                  // predicate_claim_refs
+            vec![],                                  // predicate_ops
+            vec![],                                  // predicate_rhs_is_ref
+            vec![],                                  // predicate_rhs_values
+            1,                                       // expr_len
+            vec![0],                                 // token_types (REF)
+            vec![0],                                 // token_values
+        )
+        .expect("generate_show_input failed");
+
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("output is valid JSON");
+
+        // Device key extracted from CREDENTIAL_JWT cnf.jwk.x/y
+        // x = "VFBwY7pX7dB4D1yaspaTH3InLIKyDBQE98TRW3HHdfo" → decimal
+        assert_eq!(
+            v["deviceKeyX"].as_str().unwrap(),
+            "38136402730426466088154311719490189169588191256961835765279803538047096026618"
+        );
+        // y = "ZskZ2CgfYjCejCiAMw3ggrQxvvNRM-JNLKVSLDr3cuk" → decimal
+        assert_eq!(
+            v["deviceKeyY"].as_str().unwrap(),
+            "46491225186746178845136509364803319928629564288412740419483917566167058182889"
+        );
+
+        // messageHash = SHA-256("test-nonce") mod n — must be a non-zero decimal string
+        assert!(!v["messageHash"].as_str().unwrap().is_empty());
+        assert_ne!(v["messageHash"].as_str().unwrap(), "0");
+
+        // Arrays padded to circuit dimensions
+        assert_eq!(v["claimValues"].as_array().unwrap().len(), 2);
+        assert_eq!(v["predicateClaimRefs"].as_array().unwrap().len(), 2);
+        assert_eq!(v["predicateOps"].as_array().unwrap().len(), 2);
+        assert_eq!(v["predicateRhsIsRef"].as_array().unwrap().len(), 2);
+        assert_eq!(v["predicateRhsValues"].as_array().unwrap().len(), 2);
+        assert_eq!(v["tokenTypes"].as_array().unwrap().len(), 8);
+        assert_eq!(v["tokenValues"].as_array().unwrap().len(), 8);
+
+        // Active token is REF(0)
+        assert_eq!(v["tokenTypes"][0].as_str().unwrap(), "0");
+        assert_eq!(v["tokenValues"][0].as_str().unwrap(), "0");
+        assert_eq!(v["exprLen"].as_str().unwrap(), "1");
+        assert_eq!(v["predicateLen"].as_str().unwrap(), "0");
+    }
+
+    /// Proves both circuits using the real issued vc+sd-jwt credential for the
+    /// Prepare circuit. The Show circuit uses the default synthetic inputs because
+    /// the device private key for CREDENTIAL_JWT is not available.
+    ///
+    /// Steps:
+    ///  1. Generate prepare_input.json from CREDENTIAL_JWT + issuer public key
+    ///  2. setup_prepare_keys + setup_show_keys
+    ///  3. generate_shared_blinds
+    ///  4. prove_prepare (real credential) + prove_show (synthetic default)
+    ///  5. verify_prepare + verify_show
+    #[test]
+    #[ignore = "Long-running e2e (~10 min); run with: cargo test -- --ignored e2e_real_credential_prove"]
+    fn e2e_real_credential_prove() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        // setup_mobile_docs copies default show_input.json — used by prove_show
+        let docs = setup_mobile_docs(temp.path());
+
+        // Overwrite prepare_input.json with real credential circuit input
+        let prepare_json = generate_prepare_input(
+            CREDENTIAL_JWT.to_string(),
+            ISSUER_PUBKEY_X.to_string(),
+            ISSUER_PUBKEY_Y.to_string(),
+        )
+        .expect("generate_prepare_input failed");
+        let prepare_path = PathBuf::from(&docs).join("prepare_input.json");
+        fs::write(&prepare_path, &prepare_json).expect("write prepare_input.json");
+
+        // Step 1: Setup Prepare keys
+        let r = setup_prepare_keys(docs.clone());
+        assert!(r.is_ok(), "setup_prepare_keys failed: {:?}", r.err());
+
+        // Step 2: Setup Show keys
+        let r = setup_show_keys(docs.clone());
+        assert!(r.is_ok(), "setup_show_keys failed: {:?}", r.err());
+
+        // Step 3: Generate shared blinds
+        let r = generate_shared_blinds(docs.clone());
+        assert!(r.is_ok(), "generate_shared_blinds failed: {:?}", r.err());
+
+        // Step 4: Prove Prepare (real credential)
+        let r = prove_prepare(docs.clone());
+        assert!(r.is_ok(), "prove_prepare failed: {:?}", r.err());
+        let pr = r.unwrap();
+        assert!(pr.proof_size_bytes > 0, "prepare proof must be non-empty");
+        assert!(!pr.comm_w_shared.is_empty(), "prepare comm_w_shared must be non-empty");
+        println!("  prepare prove_ms      : {}", pr.prove_ms);
+        println!("  prepare proof_size    : {} bytes", pr.proof_size_bytes);
+        println!(
+            "  prepare comm_w_shared : {}",
+            &pr.comm_w_shared[..pr.comm_w_shared.len().min(60)]
+        );
+
+        // Step 5: Prove Show (synthetic default input — device private key unavailable)
+        let r = prove_show(docs.clone());
+        assert!(r.is_ok(), "prove_show failed: {:?}", r.err());
+        let sr = r.unwrap();
+        assert!(sr.proof_size_bytes > 0, "show proof must be non-empty");
+        assert!(!sr.comm_w_shared.is_empty(), "show comm_w_shared must be non-empty");
+        println!("  show prove_ms         : {}", sr.prove_ms);
+        println!("  show proof_size       : {} bytes", sr.proof_size_bytes);
+        println!(
+            "  show comm_w_shared    : {}",
+            &sr.comm_w_shared[..sr.comm_w_shared.len().min(60)]
+        );
+
+        // Step 6: Verify Prepare
+        let r = verify_prepare(docs.clone());
+        assert!(r.is_ok(), "verify_prepare failed: {:?}", r.err());
+        assert!(r.unwrap(), "prepare proof must verify");
+
+        // Step 7: Verify Show
+        let r = verify_show(docs.clone());
+        assert!(r.is_ok(), "verify_show failed: {:?}", r.err());
+        assert!(r.unwrap(), "show proof must verify");
+    }
+
     /// Complete benchmark pipeline — exercises all 9 operations with precise timing.
     #[test]
     #[ignore = "Long-running e2e (~10 min); run with: cargo test -- --ignored e2e_complete_benchmark"]
     fn e2e_complete_benchmark() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let docs = setup_mobile_docs(&temp);
+        let docs = setup_mobile_docs(temp.path());
 
         // input_path = None → Rust uses mobile defaults: jwt_input.json, show_input.json
         let r = run_complete_benchmark(docs, None);

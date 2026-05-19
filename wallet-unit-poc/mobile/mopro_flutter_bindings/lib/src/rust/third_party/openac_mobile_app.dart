@@ -90,6 +90,75 @@ Future<String> getCommWShared({
   circuitType: circuitType,
 );
 
+/// Generate the Prepare (JWT) circuit input JSON for a `vc+sd-jwt` credential.
+///
+/// Returns a JSON string ready to write to `prepare_input.json` and pass to
+/// [`prove_prepare`].  Circuit params are fixed at the **2k** variant:
+/// `maxMessageLength=2048`, `maxMatches=4`, `maxSubstringLength=50`,
+/// `maxClaims=2`, `maxClaimLength=128`.
+///
+/// Parameters:
+/// - `jwt`: compact JWT (`header.payload.signature`, SD-JWT `~disclosure~` suffix is stripped)
+/// - `issuer_pubkey_x`: issuer P-256 X coordinate as a big-endian decimal string
+/// - `issuer_pubkey_y`: issuer P-256 Y coordinate as a big-endian decimal string
+Future<String> generatePrepareInput({
+  required String jwt,
+  required String issuerPubkeyX,
+  required String issuerPubkeyY,
+}) => RustLib.instance.api.openacMobileAppGeneratePrepareInput(
+  jwt: jwt,
+  issuerPubkeyX: issuerPubkeyX,
+  issuerPubkeyY: issuerPubkeyY,
+);
+
+/// Generate the Show circuit input JSON for a credential presentation.
+///
+/// Returns a JSON string ready to write to `show_input.json` and pass to
+/// [`prove_show`].  Circuit params are fixed at the **2k** variant:
+/// `nClaims=2`, `maxPredicates=2`, `maxLogicTokens=8`.
+///
+/// Parameters:
+/// - `jwt`: compact JWT — used to extract `cnf.jwk` device key coordinates
+/// - `device_signature`: base64url compact ES256 signature over `SHA-256(nonce)`
+/// - `nonce`: the UTF-8 string that was signed by the device key
+/// - `claim_values`: normalised claim values from the Prepare circuit output
+///   (decimal strings); padded with `"0"` to `nClaims=2`
+/// - `predicate_len`: number of active predicates (≤ 2)
+/// - `predicate_claim_refs`: which claim index each predicate evaluates
+/// - `predicate_ops`: operation code per predicate (0=LE, 1=GE, 2=EQ)
+/// - `predicate_rhs_is_ref`: 0 = literal RHS, 1 = RHS references another claim
+/// - `predicate_rhs_values`: RHS decimal string values
+/// - `expr_len`: number of active logic expression tokens (≤ 8)
+/// - `token_types`: 0=REF, 1=AND, 2=OR, 3=NOT
+/// - `token_values`: token operand values
+Future<String> generateShowInput({
+  required String jwt,
+  required String deviceSignature,
+  required String nonce,
+  required List<String> claimValues,
+  required BigInt predicateLen,
+  required Uint64List predicateClaimRefs,
+  required Uint64List predicateOps,
+  required Uint64List predicateRhsIsRef,
+  required List<String> predicateRhsValues,
+  required BigInt exprLen,
+  required Uint64List tokenTypes,
+  required Uint64List tokenValues,
+}) => RustLib.instance.api.openacMobileAppGenerateShowInput(
+  jwt: jwt,
+  deviceSignature: deviceSignature,
+  nonce: nonce,
+  claimValues: claimValues,
+  predicateLen: predicateLen,
+  predicateClaimRefs: predicateClaimRefs,
+  predicateOps: predicateOps,
+  predicateRhsIsRef: predicateRhsIsRef,
+  predicateRhsValues: predicateRhsValues,
+  exprLen: exprLen,
+  tokenTypes: tokenTypes,
+  tokenValues: tokenValues,
+);
+
 /// Test function for basic UniFFI integration
 Future<String> moproHelloWorld() =>
     RustLib.instance.api.openacMobileAppMoproHelloWorld();

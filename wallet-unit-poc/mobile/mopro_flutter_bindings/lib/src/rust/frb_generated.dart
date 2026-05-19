@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1257199256;
+  int get rustContentHash => -1161839864;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -79,8 +79,29 @@ abstract class RustLibApi extends BaseApi {
     required BigInt bytes,
   });
 
+  Future<String> openacMobileAppGeneratePrepareInput({
+    required String jwt,
+    required String issuerPubkeyX,
+    required String issuerPubkeyY,
+  });
+
   Future<String> openacMobileAppGenerateSharedBlinds({
     required String documentsPath,
+  });
+
+  Future<String> openacMobileAppGenerateShowInput({
+    required String jwt,
+    required String deviceSignature,
+    required String nonce,
+    required List<String> claimValues,
+    required BigInt predicateLen,
+    required Uint64List predicateClaimRefs,
+    required Uint64List predicateOps,
+    required Uint64List predicateRhsIsRef,
+    required List<String> predicateRhsValues,
+    required BigInt exprLen,
+    required Uint64List tokenTypes,
+    required Uint64List tokenValues,
   });
 
   Future<String> openacMobileAppGetCommWShared({
@@ -172,6 +193,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> openacMobileAppGeneratePrepareInput({
+    required String jwt,
+    required String issuerPubkeyX,
+    required String issuerPubkeyY,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(jwt, serializer);
+          sse_encode_String(issuerPubkeyX, serializer);
+          sse_encode_String(issuerPubkeyY, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerZkProofError,
+        ),
+        constMeta: kOpenacMobileAppGeneratePrepareInputConstMeta,
+        argValues: [jwt, issuerPubkeyX, issuerPubkeyY],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kOpenacMobileAppGeneratePrepareInputConstMeta =>
+      const TaskConstMeta(
+        debugName: "generate_prepare_input",
+        argNames: ["jwt", "issuerPubkeyX", "issuerPubkeyY"],
+      );
+
+  @override
   Future<String> openacMobileAppGenerateSharedBlinds({
     required String documentsPath,
   }) {
@@ -183,7 +242,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 3,
             port: port_,
           );
         },
@@ -206,6 +265,88 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> openacMobileAppGenerateShowInput({
+    required String jwt,
+    required String deviceSignature,
+    required String nonce,
+    required List<String> claimValues,
+    required BigInt predicateLen,
+    required Uint64List predicateClaimRefs,
+    required Uint64List predicateOps,
+    required Uint64List predicateRhsIsRef,
+    required List<String> predicateRhsValues,
+    required BigInt exprLen,
+    required Uint64List tokenTypes,
+    required Uint64List tokenValues,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(jwt, serializer);
+          sse_encode_String(deviceSignature, serializer);
+          sse_encode_String(nonce, serializer);
+          sse_encode_list_String(claimValues, serializer);
+          sse_encode_u_64(predicateLen, serializer);
+          sse_encode_list_prim_u_64_strict(predicateClaimRefs, serializer);
+          sse_encode_list_prim_u_64_strict(predicateOps, serializer);
+          sse_encode_list_prim_u_64_strict(predicateRhsIsRef, serializer);
+          sse_encode_list_String(predicateRhsValues, serializer);
+          sse_encode_u_64(exprLen, serializer);
+          sse_encode_list_prim_u_64_strict(tokenTypes, serializer);
+          sse_encode_list_prim_u_64_strict(tokenValues, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerZkProofError,
+        ),
+        constMeta: kOpenacMobileAppGenerateShowInputConstMeta,
+        argValues: [
+          jwt,
+          deviceSignature,
+          nonce,
+          claimValues,
+          predicateLen,
+          predicateClaimRefs,
+          predicateOps,
+          predicateRhsIsRef,
+          predicateRhsValues,
+          exprLen,
+          tokenTypes,
+          tokenValues,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kOpenacMobileAppGenerateShowInputConstMeta =>
+      const TaskConstMeta(
+        debugName: "generate_show_input",
+        argNames: [
+          "jwt",
+          "deviceSignature",
+          "nonce",
+          "claimValues",
+          "predicateLen",
+          "predicateClaimRefs",
+          "predicateOps",
+          "predicateRhsIsRef",
+          "predicateRhsValues",
+          "exprLen",
+          "tokenTypes",
+          "tokenValues",
+        ],
+      );
+
+  @override
   Future<String> openacMobileAppGetCommWShared({
     required String documentsPath,
     required String circuitType,
@@ -219,7 +360,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 5,
             port: port_,
           );
         },
@@ -250,7 +391,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 6,
             port: port_,
           );
         },
@@ -277,7 +418,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 7,
             port: port_,
           );
         },
@@ -307,7 +448,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 8,
             port: port_,
           );
         },
@@ -341,7 +482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 9,
             port: port_,
           );
         },
@@ -372,7 +513,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 10,
             port: port_,
           );
         },
@@ -406,7 +547,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 11,
             port: port_,
           );
         },
@@ -441,7 +582,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -475,7 +616,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 13,
             port: port_,
           );
         },
@@ -507,7 +648,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 14,
             port: port_,
           );
         },
@@ -539,7 +680,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 15,
             port: port_,
           );
         },
@@ -571,7 +712,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 16,
             port: port_,
           );
         },
@@ -655,6 +796,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  Uint64List dco_decode_list_prim_u_64_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeUint64List(raw);
   }
 
   @protected
@@ -787,6 +940,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  Uint64List sse_decode_list_prim_u_64_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint64List(len_);
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -911,6 +1083,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_prim_u_64_strict(
+    Uint64List self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint64List(self);
   }
 
   @protected
