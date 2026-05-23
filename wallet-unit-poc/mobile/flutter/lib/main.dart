@@ -73,26 +73,6 @@ Future<void> _copyAssetsToDocuments() async {
       }
     }
 
-    // Always overwrite input JSON files so stale cached versions from a
-    // previous app install never cause witness synthesis mismatches.
-    // jwt_input.json is used by prove_jwt; show_input.json by prove_show;
-    // run_complete_benchmark derives both paths from documentsPath automatically.
-    final inputAssets = {
-      'assets/circom/jwt_input.json': [
-        '${circomDir.path}/jwt_input.json',
-      ],
-      'assets/circom/show_input.json': [
-        '${circomDir.path}/show_input.json',
-      ],
-    };
-    for (final entry in inputAssets.entries) {
-      final data = await rootBundle.load(entry.key);
-      final bytes = data.buffer.asUint8List();
-      for (final dest in entry.value) {
-        await File(dest).writeAsBytes(bytes);
-        debugPrint('Wrote ${entry.key} → $dest');
-      }
-    }
   } catch (e) {
     debugPrint('Error copying assets: $e');
   }
@@ -172,14 +152,15 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   String? _prepareInputStatus;
   String? _prepareInputError;
 
+  bool _generatingShowInput = false;
+  String? _showInputStatus;
+  String? _showInputError;
+
   Future<String> _getDocumentsPath() async {
     final dir = await getApplicationDocumentsDirectory();
     return '${dir.path}/circom';
   }
 
-  /// Execute a single proof step and return its result.
-  /// All Rust functions resolve their own input paths from documents_path;
-  /// no inputPath parameter is passed.
   Future<TaskResult> _executeStep(
       ProofTaskType taskType, String documentsPath) async {
     switch (taskType) {
@@ -215,35 +196,19 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
 
       case ProofTaskType.proveJwt:
         final pr = await proveJwt(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          proofResult: pr,
-        );
+        return TaskResult(taskType: taskType, success: true, proofResult: pr);
 
       case ProofTaskType.proveShow:
         final pr = await proveShow(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          proofResult: pr,
-        );
+        return TaskResult(taskType: taskType, success: true, proofResult: pr);
 
       case ProofTaskType.reblindJwt:
         final pr = await reblindJwt(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          proofResult: pr,
-        );
+        return TaskResult(taskType: taskType, success: true, proofResult: pr);
 
       case ProofTaskType.reblindShow:
         final pr = await reblindShow(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          proofResult: pr,
-        );
+        return TaskResult(taskType: taskType, success: true, proofResult: pr);
 
       case ProofTaskType.verifyJwt:
         final t = DateTime.now();
@@ -267,8 +232,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     }
   }
 
-  /// Calls [generatePrepareInput] with the hardcoded real credential and writes
-  /// the result to `{docs}/prepare_input.json`, replacing the bundled test input.
   Future<void> _generateAndWritePrepareInput() async {
     setState(() {
       _generatingInput = true;
@@ -299,6 +262,51 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     }
   }
 
+  // Synthetic test vectors from circom/inputs/show/2k/default.json.
+  // The Show circuit verifies device-key possession (ECDSA over nonce hash) independently
+  // from the JWT's cnf.jwk; a valid proof requires the matching device private key, which
+  // is unavailable here. These pre-computed values satisfy all circuit constraints.
+  static const _kTestShowInput = {
+    'deviceKeyX': '70867448702559710706831157867104375348666111976485036757500306755907228884591',
+    'deviceKeyY': '95330439344815577998657911774240551168106261928322957515823793358082361230370',
+    'sig_r': '97632141132390985819876785886928667193064512393283543898194803008435992732086',
+    'sig_s_inverse': '106822633150040209395395885354646968871852125874546732758721975965629038861865',
+    'messageHash': '21526899450503750036093500952609951056866772331291366231662559071055169445756',
+    'predicateLen': '1',
+    'claimValues': ['1040605', '0'],
+    'predicateClaimRefs': ['0', '0'],
+    'predicateOps': ['0', '2'],
+    'predicateRhsIsRef': ['0', '0'],
+    'predicateRhsValues': ['1070101', '1040605'],
+    'tokenTypes': ['0', '0', '0', '0', '0', '0', '0', '0'],
+    'tokenValues': ['0', '0', '0', '0', '0', '0', '0', '0'],
+    'exprLen': '1',
+  };
+
+  Future<void> _generateAndWriteShowInput() async {
+    setState(() {
+      _generatingShowInput = true;
+      _showInputStatus = null;
+      _showInputError = null;
+    });
+    try {
+      final docs = await _getDocumentsPath();
+      final jsonStr = jsonEncode(_kTestShowInput);
+      await File('$docs/show_input.json').writeAsString(jsonStr);
+      setState(() {
+        _showInputStatus =
+            'devKeyX=${(_kTestShowInput['deviceKeyX'] as String).substring(0, 8)}…  '
+            'msgHash=${(_kTestShowInput['messageHash'] as String).substring(0, 8)}…';
+        _generatingShowInput = false;
+      });
+    } catch (e) {
+      setState(() {
+        _showInputError = e.toString();
+        _generatingShowInput = false;
+      });
+    }
+  }
+
   Future<void> _runOperation(ProofTaskType taskType) async {
     setState(() {
       _isOperating = true;
@@ -323,10 +331,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     }
   }
 
-  /// Run the full 9-step workflow sequentially, matching e2e_full_workflow in lib.rs:
-  ///   setup_jwt → setup_show → generate_blinds →
-  ///   prove_jwt → reblind_jwt → prove_show → reblind_show →
-  ///   verify_jwt → verify_show
+  /// Full 11-step pipeline: generate inputs → setup → blinds → prove/reblind → verify.
   Future<void> _runE2EWorkflow() async {
     setState(() {
       _isOperating = true;
@@ -334,11 +339,40 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       _error = null;
       _results = {};
       _completedSteps = {};
+      _prepareInputStatus = null;
+      _prepareInputError = null;
+      _showInputStatus = null;
+      _showInputError = null;
       _currentWorkflowStep = null;
     });
 
-    final docs = await _getDocumentsPath();
+    // Step 1a: Generate prepare input
+    setState(() => _currentWorkflowStep = '1/11: Generate Prepare Input');
+    await _generateAndWritePrepareInput();
+    if (_prepareInputError != null) {
+      setState(() {
+        _error = Exception('Pipeline stopped: Generate Prepare Input failed');
+        _isOperating = false;
+        _workflowRunning = false;
+        _currentWorkflowStep = null;
+      });
+      return;
+    }
 
+    // Step 1b: Generate show input
+    setState(() => _currentWorkflowStep = '2/11: Generate Show Input');
+    await _generateAndWriteShowInput();
+    if (_showInputError != null) {
+      setState(() {
+        _error = Exception('Pipeline stopped: Generate Show Input failed');
+        _isOperating = false;
+        _workflowRunning = false;
+        _currentWorkflowStep = null;
+      });
+      return;
+    }
+
+    final docs = await _getDocumentsPath();
     const steps = [
       ProofTaskType.setupJwt,
       ProofTaskType.setupShow,
@@ -355,9 +389,8 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       final step = steps[i];
       setState(() {
         _currentWorkflowStep =
-            '${i + 1}/${steps.length}: ${_taskTypeToDisplayName(step)}';
+            '${i + 3}/11: ${_taskTypeToDisplayName(step)}';
       });
-
       try {
         final result = await _executeStep(step, docs);
         setState(() {
@@ -367,7 +400,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
         if (!result.success) {
           setState(() {
             _error = Exception(
-                'Workflow stopped: ${_taskTypeToDisplayName(step)} failed');
+                'Pipeline stopped: ${_taskTypeToDisplayName(step)} failed');
             _isOperating = false;
             _workflowRunning = false;
             _currentWorkflowStep = null;
@@ -380,7 +413,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
               TaskResult(taskType: step, success: false, error: e.toString());
           _completedSteps[step.name] = false;
           _error = Exception(
-              'Workflow stopped at ${_taskTypeToDisplayName(step)}: $e');
+              'Pipeline stopped at ${_taskTypeToDisplayName(step)}: $e');
           _isOperating = false;
           _workflowRunning = false;
           _currentWorkflowStep = null;
@@ -404,9 +437,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     });
     try {
       final docs = await _getDocumentsPath();
-      final results = await runCompleteBenchmark(
-        documentsPath: docs,
-      );
+      final results = await runCompleteBenchmark(documentsPath: docs);
       setState(() {
         _benchmarkResults = results;
         _isOperating = false;
@@ -428,13 +459,17 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       _benchmarkResults = null;
       _workflowRunning = false;
       _currentWorkflowStep = null;
+      _prepareInputStatus = null;
+      _prepareInputError = null;
+      _showInputStatus = null;
+      _showInputError = null;
     });
   }
 
   String _taskTypeToDisplayName(ProofTaskType type) {
     return switch (type) {
-      ProofTaskType.setupJwt => 'Setup JWT Keys',
-      ProofTaskType.setupShow => 'Setup Show Keys',
+      ProofTaskType.setupJwt => 'Setup JWT',
+      ProofTaskType.setupShow => 'Setup Show',
       ProofTaskType.generateBlinds => 'Generate Shared Blinds',
       ProofTaskType.proveJwt => 'Prove JWT',
       ProofTaskType.proveShow => 'Prove Show',
@@ -445,13 +480,33 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     };
   }
 
+  // ── Step completion helpers ──────────────────────────────────────────────
+
+  bool get _step1Complete =>
+      _prepareInputStatus != null && _showInputStatus != null;
+  bool get _step2Complete =>
+      _completedSteps['setupJwt'] == true &&
+      _completedSteps['setupShow'] == true;
+  bool get _step3Complete => _completedSteps['generateBlinds'] == true;
+  bool get _step4Complete =>
+      _completedSteps['proveJwt'] == true &&
+      _completedSteps['reblindJwt'] == true;
+  bool get _step5Complete =>
+      _completedSteps['proveShow'] == true &&
+      _completedSteps['reblindShow'] == true;
+  bool get _step6Complete =>
+      _completedSteps['verifyJwt'] == true &&
+      _completedSteps['verifyShow'] == true;
+
+  // ── Build ────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('OpenAC E2E Proof Workflow'),
+        title: const Text('zkID Proof Pipeline'),
         actions: [
-          if (_results.isNotEmpty && !_isOperating)
+          if (!_isOperating)
             IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: _reset,
@@ -464,403 +519,285 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (_error != null)
-              Card(
-                color: Colors.red.shade50,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    children: [
-                      Icon(Icons.error, color: Colors.red.shade700),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _error.toString(),
-                          style: TextStyle(color: Colors.red.shade900),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: () => setState(() => _error = null),
-                      ),
-                    ],
+            if (_error != null) _buildErrorBanner(),
+            _buildQuickActions(),
+            const SizedBox(height: 20),
+            _buildStep(
+              step: 1,
+              title: 'Generate Inputs',
+              icon: Icons.input,
+              color: Colors.cyan.shade700,
+              completed: _step1Complete,
+              child: _buildStep1Content(),
+            ),
+            _buildConnector(),
+            _buildStep(
+              step: 2,
+              title: 'Key Setup',
+              icon: Icons.key,
+              color: Colors.blue.shade700,
+              completed: _step2Complete,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.setupJwt,
+                      label: 'Setup JWT',
+                      icon: Icons.key,
+                      color: Colors.blue,
+                    ),
                   ),
-                ),
-              ),
-
-            const SizedBox(height: 16),
-
-            // ── Generate Circuit Inputs ────────────────────────────────────
-            Card(
-              elevation: 4,
-              color: Colors.cyan.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.credit_card, color: Colors.cyan.shade700),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'Generate Circuit Inputs',
-                          style: TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.setupShow,
+                      label: 'Setup Show',
+                      icon: Icons.key,
+                      color: Colors.blue,
                     ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Generate prepare_input.json from the real vc+sd-jwt credential '
-                      '(Taiwan gov wallet demo, alg ES256). '
-                      'Run this before proving to use the real credential instead of the bundled test input.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: (_isOperating || _generatingInput)
-                            ? null
-                            : _generateAndWritePrepareInput,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.cyan.shade700,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.all(14),
-                        ),
-                        icon: _generatingInput
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                      Colors.white),
-                                ),
-                              )
-                            : const Icon(Icons.upload_file),
-                        label: Text(_generatingInput
-                            ? 'Generating prepare_input.json…'
-                            : 'Generate Prepare Input (Real Credential)'),
-                      ),
-                    ),
-                    if (_prepareInputStatus != null) ...[
-                      const SizedBox(height: 10),
-                      Row(
-                        children: [
-                          const Icon(Icons.check_circle,
-                              color: Colors.green, size: 16),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              _prepareInputStatus!,
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.green.shade700,
-                                  fontFamily: 'monospace'),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (_prepareInputError != null) ...[
-                      const SizedBox(height: 10),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Icon(Icons.error,
-                              color: Colors.red, size: 16),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              _prepareInputError!,
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.red.shade700),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-
-            const SizedBox(height: 16),
-
-            // ── E2E Full Workflow ──────────────────────────────────────────
-            Card(
-              elevation: 4,
-              color: Colors.indigo.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(Icons.play_circle_filled,
-                            color: Colors.indigo.shade700),
-                        const SizedBox(width: 8),
-                        const Text(
-                          'E2E Full Workflow',
-                          style: TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Runs all 9 steps sequentially: setup → generate blinds → prove → reblind → verify for both circuits.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                    if (_workflowRunning && _currentWorkflowStep != null) ...[
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _currentWorkflowStep!,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w500,
-                              color: Colors.indigo.shade700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isOperating ? null : _runE2EWorkflow,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.indigo,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.all(16),
-                        ),
-                        icon: _workflowRunning
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                      Colors.white),
-                                ),
-                              )
-                            : const Icon(Icons.play_circle_filled),
-                        label: Text(_workflowRunning
-                            ? 'Running Workflow...'
-                            : 'Run E2E Workflow (9 steps)'),
-                      ),
-                    ),
-                  ],
-                ),
+            _buildConnector(),
+            _buildStep(
+              step: 3,
+              title: 'Generate Shared Blinds',
+              icon: Icons.shuffle,
+              color: Colors.orange.shade700,
+              completed: _step3Complete,
+              child: _buildOperationButton(
+                taskType: ProofTaskType.generateBlinds,
+                label: 'Generate Shared Blinds',
+                icon: Icons.shuffle,
+                color: Colors.orange,
               ),
             ),
-
-            const SizedBox(height: 16),
-
-            // ── Complete Benchmark ─────────────────────────────────────────
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.speed, color: Colors.deepPurple),
-                        SizedBox(width: 8),
-                        Text(
-                          'Complete Benchmark',
-                          style: TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                        ),
-                      ],
+            _buildConnector(),
+            _buildStep(
+              step: 4,
+              title: 'JWT Proof',
+              icon: Icons.assignment,
+              color: Colors.green.shade700,
+              completed: _step4Complete,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.proveJwt,
+                      label: 'Prove JWT',
+                      icon: Icons.calculate,
+                      color: Colors.green,
                     ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Runs all 9 operations and reports timing + artifact sizes.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.reblindJwt,
+                      label: 'Reblind JWT',
+                      icon: Icons.sync,
+                      color: Colors.green,
                     ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isOperating ? null : _runBenchmark,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.deepPurple,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.all(16),
-                        ),
-                        icon: _isOperating
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                      Colors.white),
-                                ),
-                              )
-                            : const Icon(Icons.speed),
-                        label: Text(_isOperating
-                            ? 'Running Benchmark...'
-                            : 'Run Complete Benchmark'),
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-
+            _buildConnector(),
+            _buildStep(
+              step: 5,
+              title: 'Show Proof',
+              icon: Icons.visibility,
+              color: Colors.deepPurple.shade700,
+              completed: _step5Complete,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.proveShow,
+                      label: 'Prove Show',
+                      icon: Icons.calculate,
+                      color: Colors.deepPurple,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.reblindShow,
+                      label: 'Reblind Show',
+                      icon: Icons.sync,
+                      color: Colors.deepPurple,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            _buildConnector(),
+            _buildStep(
+              step: 6,
+              title: 'Verify Proofs',
+              icon: Icons.check_circle,
+              color: Colors.teal.shade700,
+              completed: _step6Complete,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.verifyJwt,
+                      label: 'Verify JWT',
+                      icon: Icons.check_circle,
+                      color: Colors.teal,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _buildOperationButton(
+                      taskType: ProofTaskType.verifyShow,
+                      label: 'Verify Show',
+                      icon: Icons.check_circle,
+                      color: Colors.teal,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (_results.isNotEmpty) ...[
+              const SizedBox(height: 28),
+              const Divider(),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Icon(Icons.assessment, color: Colors.grey.shade700),
+                  const SizedBox(width: 8),
+                  Text('Results',
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey.shade800)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ..._results.entries.map((e) => _buildResultCard(e.key, e.value)),
+            ],
             if (_benchmarkResults != null) ...[
               const SizedBox(height: 16),
               _buildBenchmarkResults(),
             ],
-
             const SizedBox(height: 24),
-            const Divider(),
-            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
 
-            // ── Step 1: Key Setup ──────────────────────────────────────────
-            _buildSectionHeader('Step 1: Key Setup', Icons.settings),
+  // ── Quick Actions ────────────────────────────────────────────────────────
+
+  Widget _buildErrorBanner() {
+    return Card(
+      color: Colors.red.shade50,
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Icon(Icons.error, color: Colors.red.shade700),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(_error.toString(),
+                  style: TextStyle(color: Colors.red.shade900)),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: () => setState(() => _error = null),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildQuickActions() {
+    return Card(
+      elevation: 3,
+      color: Colors.indigo.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.rocket_launch, color: Colors.indigo),
+                SizedBox(width: 8),
+                Text('Quick Actions',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ],
+            ),
             const SizedBox(height: 12),
             Row(
               children: [
                 Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.setupJwt,
-                    label: 'Setup JWT',
-                    icon: Icons.key,
-                    color: Colors.blue,
+                  flex: 3,
+                  child: ElevatedButton.icon(
+                    onPressed: _isOperating ? null : _runE2EWorkflow,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.indigo,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(14),
+                    ),
+                    icon: _workflowRunning
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          )
+                        : const Icon(Icons.play_circle_filled),
+                    label: Text(_workflowRunning
+                        ? 'Running…'
+                        : 'Run Full Pipeline (11 steps)'),
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 10),
                 Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.setupShow,
-                    label: 'Setup Show',
-                    icon: Icons.key,
-                    color: Colors.blue,
+                  flex: 2,
+                  child: ElevatedButton.icon(
+                    onPressed: _isOperating ? null : _runBenchmark,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.deepPurple,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(14),
+                    ),
+                    icon: const Icon(Icons.speed),
+                    label: const Text('Benchmark'),
                   ),
                 ),
               ],
             ),
-
-            const SizedBox(height: 24),
-
-            // ── Step 2: Generate Shared Blinds ─────────────────────────────
-            _buildSectionHeader(
-                'Step 2: Generate Shared Blinds', Icons.shuffle),
-            const SizedBox(height: 12),
-            _buildOperationButton(
-              taskType: ProofTaskType.generateBlinds,
-              label: 'Generate Shared Blinds',
-              icon: Icons.shuffle,
-              color: Colors.orange,
-            ),
-
-            const SizedBox(height: 24),
-
-            // ── Step 3: JWT ────────────────────────────────────────────────
-            _buildSectionHeader('Step 3: JWT', Icons.assignment),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.proveJwt,
-                    label: 'Prove JWT',
-                    icon: Icons.calculate,
-                    color: Colors.green,
+            if (_workflowRunning && _currentWorkflowStep != null) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.reblindJwt,
-                    label: 'Reblind JWT',
-                    icon: Icons.sync,
-                    color: Colors.green,
+                  const SizedBox(width: 8),
+                  Text(
+                    _currentWorkflowStep!,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: Colors.indigo.shade700),
                   ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 24),
-
-            // ── Step 4: Show ───────────────────────────────────────────────
-            _buildSectionHeader('Step 4: Show', Icons.visibility),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.proveShow,
-                    label: 'Prove Show',
-                    icon: Icons.calculate,
-                    color: Colors.deepPurple,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.reblindShow,
-                    label: 'Reblind Show',
-                    icon: Icons.sync,
-                    color: Colors.deepPurple,
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 24),
-
-            // ── Step 5: Verify ─────────────────────────────────────────────
-            _buildSectionHeader('Step 5: Verify Proofs', Icons.check_circle),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.verifyJwt,
-                    label: 'Verify JWT',
-                    icon: Icons.check_circle,
-                    color: Colors.teal,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildOperationButton(
-                    taskType: ProofTaskType.verifyShow,
-                    label: 'Verify Show',
-                    icon: Icons.check_circle,
-                    color: Colors.teal,
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 24),
-            const Divider(),
-            const SizedBox(height: 16),
-
-            // ── Results ────────────────────────────────────────────────────
-            if (_results.isNotEmpty) ...[
-              _buildSectionHeader('Results', Icons.assessment),
-              const SizedBox(height: 12),
-              ..._results.entries.map((e) => _buildResultCard(e.key, e.value)),
+                ],
+              ),
             ],
           ],
         ),
@@ -868,22 +805,178 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     );
   }
 
-  Widget _buildSectionHeader(String title, IconData icon) {
-    return Row(
+  // ── Step card shell ──────────────────────────────────────────────────────
+
+  Widget _buildStep({
+    required int step,
+    required String title,
+    required IconData icon,
+    required Color color,
+    required bool completed,
+    required Widget child,
+  }) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: completed
+            ? BorderSide(color: color, width: 1.5)
+            : BorderSide(color: Colors.grey.shade200),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 14,
+                  backgroundColor: completed ? color : Colors.grey.shade300,
+                  child: Text(
+                    '$step',
+                    style: TextStyle(
+                      color: completed ? Colors.white : Colors.grey.shade600,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Icon(icon, color: color, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey.shade800,
+                  ),
+                ),
+                if (completed) ...[
+                  const Spacer(),
+                  Icon(Icons.check_circle, color: color, size: 18),
+                ],
+              ],
+            ),
+            const SizedBox(height: 14),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnector() {
+    return Center(
+      child: Container(
+        width: 2,
+        height: 20,
+        color: Colors.grey.shade300,
+      ),
+    );
+  }
+
+  // ── Step 1: Generate Inputs ──────────────────────────────────────────────
+
+  Widget _buildStep1Content() {
+    final busy = _isOperating || _generatingInput || _generatingShowInput;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Icon(icon, color: Colors.grey.shade700),
-        const SizedBox(width: 8),
-        Text(
-          title,
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Colors.grey.shade800,
-          ),
+        _buildInputButton(
+          label: 'Generate Prepare Input',
+          isLoading: _generatingInput,
+          isDone: _prepareInputStatus != null,
+          status: _prepareInputStatus,
+          error: _prepareInputError,
+          color: Colors.cyan.shade700,
+          onPressed: busy ? null : _generateAndWritePrepareInput,
+        ),
+        const SizedBox(height: 10),
+        _buildInputButton(
+          label: 'Generate Show Input',
+          isLoading: _generatingShowInput,
+          isDone: _showInputStatus != null,
+          status: _showInputStatus,
+          error: _showInputError,
+          color: Colors.teal.shade700,
+          onPressed: busy ? null : _generateAndWriteShowInput,
         ),
       ],
     );
   }
+
+  Widget _buildInputButton({
+    required String label,
+    required bool isLoading,
+    required bool isDone,
+    required String? status,
+    required String? error,
+    required Color color,
+    required VoidCallback? onPressed,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ElevatedButton.icon(
+          onPressed: onPressed,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: isDone ? color.withValues(alpha: 0.12) : color,
+            foregroundColor: isDone ? color : Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+          ),
+          icon: isLoading
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                        isDone ? color : Colors.white),
+                  ),
+                )
+              : Icon(isDone ? Icons.check_circle : Icons.upload_file),
+          label: Text(isLoading ? 'Generating…' : label),
+        ),
+        if (status != null) ...[
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green.shade600, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  status,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.green.shade700,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (error != null) ...[
+          const SizedBox(height: 6),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.error, color: Colors.red.shade600, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(error,
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700)),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ── Proof operation buttons ──────────────────────────────────────────────
 
   Widget _buildOperationButton({
     required ProofTaskType taskType,
@@ -922,6 +1015,8 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     );
   }
 
+  // ── Result cards ─────────────────────────────────────────────────────────
+
   Widget _buildResultCard(String taskName, TaskResult result) {
     final taskType =
         ProofTaskType.values.firstWhere((e) => e.name == taskName);
@@ -942,27 +1037,22 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    displayName,
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
+                  child: Text(displayName,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
             const SizedBox(height: 12),
-
             if (result.error != null) ...[
               Text('Error: ${result.error}',
                   style: TextStyle(color: Colors.red.shade700)),
               const SizedBox(height: 8),
             ],
-
             if (result.message != null) ...[
               Text(result.message!),
               const SizedBox(height: 8),
             ],
-
             if (result.totalMs != null) ...[
               const Text('Timing:',
                   style: TextStyle(fontWeight: FontWeight.bold)),
@@ -970,7 +1060,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
               Text('• Total: ${result.totalMs}ms'),
               const SizedBox(height: 8),
             ],
-
             if (result.proofSizeBytes != null) ...[
               Text(
                 'Proof Size: ${(result.proofSizeBytes!.toInt() / 1024).toStringAsFixed(2)} KB',
@@ -978,7 +1067,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
               ),
               const SizedBox(height: 8),
             ],
-
             if (result.commWShared != null) ...[
               const Text('Shared Commitment:',
                   style: TextStyle(fontWeight: FontWeight.bold)),
@@ -999,7 +1087,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
                 ),
               ),
             ],
-
             if (result.verifyResult != null) ...[
               const SizedBox(height: 8),
               Text(
@@ -1019,6 +1106,8 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       ),
     );
   }
+
+  // ── Benchmark results ────────────────────────────────────────────────────
 
   Widget _buildBenchmarkResults() {
     if (_benchmarkResults == null) return const SizedBox.shrink();
@@ -1051,7 +1140,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
               ],
             ),
             const SizedBox(height: 16),
-
             const Text('Timing Metrics',
                 style: TextStyle(
                     fontSize: 16,
@@ -1077,7 +1165,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
                 _timingRow('Verify Show', r.verifyShowMs),
               ],
             ),
-
             const SizedBox(height: 24),
             const Text('Artifact Sizes',
                 style: TextStyle(
