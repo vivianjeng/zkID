@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 
+import 'credential_page.dart';
 import 'package:mopro_flutter_bindings/src/rust/frb_generated.dart';
 import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.dart'
     show
@@ -156,6 +159,56 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   String? _showInputStatus;
   String? _showInputError;
 
+  // Deep-link state
+  String? _receivedSdJwt;   // full SD-JWT  (header.payload.sig~disc~)
+  String? _receivedJwt;     // JWT-only part (header.payload.sig)
+  List<String>? _prepareClaimValues; // claimValues from prepare output → forwarded to show input
+  StreamSubscription<Uri>? _linkSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _initDeepLinks();
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _initDeepLinks() {
+    final appLinks = AppLinks();
+    _linkSubscription = appLinks.uriLinkStream.listen(_handleDeepLink);
+    appLinks.getInitialLink().then((uri) {
+      if (uri != null) _handleDeepLink(uri);
+    });
+  }
+
+  void _handleDeepLink(Uri uri) {
+    if (uri.scheme != 'openac' || uri.host != 'zkproof') return;
+    final vc = uri.queryParameters['vc'];
+    if (vc == null || vc.isEmpty) return;
+    final jwtPart = vc.split('~').first;
+    debugPrint('[DeepLink] received sdJwt length=${vc.length}');
+    debugPrint('[DeepLink] jwt part: $jwtPart');
+    setState(() {
+      _receivedSdJwt = vc;
+      _receivedJwt = jwtPart;
+      _prepareClaimValues = null;
+      _prepareInputStatus = null;
+      _prepareInputError = null;
+      _showInputStatus = null;
+      _showInputError = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => CredentialPage(sdJwt: vc),
+      ));
+    });
+  }
+
   Future<String> _getDocumentsPath() async {
     final dir = await getApplicationDocumentsDirectory();
     return '${dir.path}/circom';
@@ -237,23 +290,33 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       _generatingInput = true;
       _prepareInputStatus = null;
       _prepareInputError = null;
+      _prepareClaimValues = null;
     });
     try {
       final docs = await _getDocumentsPath();
+      final jwt = _receivedJwt ?? _kCredentialJwt;
       final jsonStr = await generatePrepareInput(
-        jwt: _kCredentialJwt,
+        jwt: jwt,
         issuerPubkeyX: _kIssuerPubkeyX,
         issuerPubkeyY: _kIssuerPubkeyY,
       );
       await File('$docs/prepare_input.json').writeAsString(jsonStr);
       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final claimValues = (data['claimValues'] as List?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          ['0', '0'];
       setState(() {
-        _prepareInputStatus =
-            'messageLength=${data['messageLength']}  '
+        _prepareClaimValues = claimValues;
+        _prepareInputStatus = 'messageLength=${data['messageLength']}  '
             'periodIndex=${data['periodIndex']}  '
             'matchesCount=${data['matchesCount']}';
         _generatingInput = false;
       });
+      // When triggered by a deep link, chain directly into show input
+      if (_receivedJwt != null) {
+        await _generateAndWriteShowInput();
+      }
     } catch (e) {
       setState(() {
         _prepareInputError = e.toString();
@@ -291,11 +354,21 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     });
     try {
       final docs = await _getDocumentsPath();
-      final jsonStr = jsonEncode(_kTestShowInput);
+      final claimValues = _prepareClaimValues ?? ['0', '0'];
+
+      // Always use synthetic ECDSA test values (circom/inputs/show/2k/default.json).
+      // The Show circuit verifies device-key possession independently from the
+      // credential's cnf.jwk; proving with a real device key requires the Secure
+      // Enclave private key from the TWDIW wallet, which is unavailable here.
+      // claimValues[0]=0 satisfies the LE predicate (0 ≤ 1070101) for any credential.
+      final showInput = Map<String, dynamic>.from(_kTestShowInput);
+      showInput['claimValues'] = claimValues;
+
+      final jsonStr = jsonEncode(showInput);
       await File('$docs/show_input.json').writeAsString(jsonStr);
       setState(() {
         _showInputStatus =
-            'devKeyX=${(_kTestShowInput['deviceKeyX'] as String).substring(0, 8)}…  '
+            'claimValues=$claimValues  '
             'msgHash=${(_kTestShowInput['messageHash'] as String).substring(0, 8)}…';
         _generatingShowInput = false;
       });
@@ -463,6 +536,9 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       _prepareInputError = null;
       _showInputStatus = null;
       _showInputError = null;
+      _receivedSdJwt = null;
+      _receivedJwt = null;
+      _prepareClaimValues = null;
     });
   }
 
@@ -519,6 +595,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_receivedSdJwt != null) _buildCredentialBanner(),
             if (_error != null) _buildErrorBanner(),
             _buildQuickActions(),
             const SizedBox(height: 20),
@@ -690,6 +767,40 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   }
 
   // ── Quick Actions ────────────────────────────────────────────────────────
+
+  Widget _buildCredentialBanner() {
+    final jwt = _receivedJwt ?? '';
+    final preview = jwt.length > 40 ? '${jwt.substring(0, 40)}…' : jwt;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.green.shade50,
+        border: Border.all(color: Colors.green.shade300),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.verified, color: Colors.green.shade700, size: 16),
+            const SizedBox(width: 6),
+            Text('Credential received from TWDIW wallet',
+                style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.green.shade800,
+                    fontSize: 13)),
+          ]),
+          const SizedBox(height: 4),
+          Text(preview,
+              style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 10,
+                  color: Colors.green.shade700)),
+        ],
+      ),
+    );
+  }
 
   Widget _buildErrorBanner() {
     return Card(
