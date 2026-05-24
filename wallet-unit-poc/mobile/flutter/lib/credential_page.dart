@@ -3,9 +3,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.dart'
     show
+        ProofResult,
         generatePrepareInput,
         generateSharedBlinds,
         proveJwt,
@@ -40,6 +42,7 @@ class _CredentialPageState extends State<CredentialPage> {
   int _currentStepIndex = 0; // 1–6; 0 = not started
   String _currentSubStep = '';
   final Set<int> _completedSteps = {};
+  Map<String, dynamic>? _proofSummary; // collected after pipeline completes
 
   // Synthetic ECDSA test vectors from circom/inputs/show/2k/default.json.
   // The Show circuit verifies device-key possession (ECDSA over nonce hash)
@@ -143,9 +146,9 @@ class _CredentialPageState extends State<CredentialPage> {
         _currentStepIndex = 4;
         _currentSubStep = 'Prove JWT…';
       });
-      await proveJwt(documentsPath: docs);
+      final ProofResult jwtProofResult = await proveJwt(documentsPath: docs);
       setState(() => _currentSubStep = 'Reblind JWT…');
-      await reblindJwt(documentsPath: docs);
+      final ProofResult jwtReblindResult = await reblindJwt(documentsPath: docs);
       setState(() => _completedSteps.add(4));
 
       // Step 5: Show Proof
@@ -153,9 +156,9 @@ class _CredentialPageState extends State<CredentialPage> {
         _currentStepIndex = 5;
         _currentSubStep = 'Prove show…';
       });
-      await proveShow(documentsPath: docs);
+      final ProofResult showProofResult = await proveShow(documentsPath: docs);
       setState(() => _currentSubStep = 'Reblind show…');
-      await reblindShow(documentsPath: docs);
+      final ProofResult showReblindResult = await reblindShow(documentsPath: docs);
       setState(() => _completedSteps.add(5));
 
       // Step 6: Verify Proofs
@@ -170,15 +173,67 @@ class _CredentialPageState extends State<CredentialPage> {
       if (!showOk) throw Exception('Show verification failed');
       setState(() => _completedSteps.add(6));
 
+      final summary = {
+        'jwtProof': {
+          'commWShared': jwtProofResult.commWShared,
+          'proofSizeBytes': jwtProofResult.proofSizeBytes?.toString(),
+          'totalMs': jwtProofResult.totalMs?.toString(),
+        },
+        'jwtReblind': {
+          'commWShared': jwtReblindResult.commWShared,
+          'proofSizeBytes': jwtReblindResult.proofSizeBytes?.toString(),
+        },
+        'showProof': {
+          'commWShared': showProofResult.commWShared,
+          'proofSizeBytes': showProofResult.proofSizeBytes?.toString(),
+          'totalMs': showProofResult.totalMs?.toString(),
+        },
+        'showReblind': {
+          'commWShared': showReblindResult.commWShared,
+          'proofSizeBytes': showReblindResult.proofSizeBytes?.toString(),
+        },
+        'verified': {'jwt': jwtOk, 'show': showOk},
+      };
+
       setState(() {
+        _proofSummary = summary;
         _pipelineRunning = false;
         _pipelineDone = true;
       });
+
+      // Auto-send proof back to TWDIW Digital Wallet
+      await _sendProofToWallet(summary);
     } catch (e) {
       setState(() {
         _pipelineRunning = false;
         _pipelineError = e.toString();
       });
+    }
+  }
+
+  Future<void> _sendProofToWallet(Map<String, dynamic> _) async {
+    try {
+      final docs = await _getDocumentsPath();
+      final prepareBytes = await File('$docs/keys/prepare_proof.bin').readAsBytes();
+      final showBytes    = await File('$docs/keys/show_proof.bin').readAsBytes();
+
+      // Pack both proofs as a JSON envelope so the receiver can split them.
+      final envelope = jsonEncode({
+        'prepareProof': base64.encode(prepareBytes),
+        'showProof':    base64.encode(showBytes),
+      });
+      final base64Proof = base64Url.encode(utf8.encode(envelope));
+
+      final uri = Uri.parse(
+          'modadigitalwallet://zkproof-result?proof=${Uri.encodeComponent(base64Proof)}');
+      debugPrint('[CredentialPage] sending proof to TWDIW: ${uri.toString().substring(0, 60)}…');
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        debugPrint('[CredentialPage] TWDIW not installed — proof not sent');
+      }
+    } catch (e) {
+      debugPrint('[CredentialPage] _sendProofToWallet error: $e');
     }
   }
 
@@ -374,7 +429,9 @@ class _CredentialPageState extends State<CredentialPage> {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              onPressed: null, // TODO: deep-link back to TWDIW DigitalWallet
+              onPressed: _proofSummary == null
+                  ? null
+                  : () => _sendProofToWallet(_proofSummary!),
               style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
