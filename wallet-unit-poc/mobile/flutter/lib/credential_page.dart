@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.dart'
@@ -23,12 +24,15 @@ const String _kIssuerPubkeyX =
 const String _kIssuerPubkeyY =
     '94717717123739987908966931526384127659809793164315839803856846695569747893398';
 
+const _kProofSubmitUrl = 'https://alcohol-purchase-frontend.vivi43222.workers.dev/openac/proof';
+
 /// Displays a parsed vc+sd-jwt credential and runs the full ZK-proof pipeline
 /// inline when the user taps "Generate ZK Proof".
 class CredentialPage extends StatefulWidget {
   final String sdJwt;
+  final String? transactionId;
 
-  const CredentialPage({super.key, required this.sdJwt});
+  const CredentialPage({super.key, required this.sdJwt, this.transactionId});
 
   @override
   State<CredentialPage> createState() => _CredentialPageState();
@@ -41,6 +45,10 @@ class _CredentialPageState extends State<CredentialPage> {
   int _currentStepIndex = 0;
   String _currentSubStep = '';
   final Set<int> _completedSteps = {};
+
+  bool _submitting = false;
+  String? _submitResult;
+  String? _submitError;
 
   // Synthetic ECDSA test vectors from circom/inputs/show/2k/default.json.
   // The Show circuit verifies device-key possession (ECDSA over nonce hash)
@@ -179,6 +187,50 @@ class _CredentialPageState extends State<CredentialPage> {
       setState(() {
         _pipelineRunning = false;
         _pipelineError = e.toString();
+      });
+    }
+  }
+
+  // ── Submit proof ───────────────────────────────────────────────────────────
+
+  Future<void> _submitProof() async {
+    setState(() {
+      _submitting = true;
+      _submitResult = null;
+      _submitError = null;
+    });
+    try {
+      final docs = await _getDocumentsPath();
+      final prepareBytes =
+          await File('$docs/keys/prepare_proof.bin').readAsBytes();
+      final showBytes = await File('$docs/keys/show_proof.bin').readAsBytes();
+
+      final body = jsonEncode({
+        'transactionId': widget.transactionId ?? '',
+        'prepareProof': base64Encode(prepareBytes),
+        'showProof': base64Encode(showBytes),
+      });
+
+      final res = await http.post(
+        Uri.parse(_kProofSubmitUrl),
+        headers: {'Content-Type': 'application/json'},
+        body: body,
+      );
+
+      if (!mounted) return;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        setState(() {
+          _submitting = false;
+          _submitResult = res.body;
+        });
+      } else {
+        throw Exception('HTTP ${res.statusCode}: ${res.body}');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _submitting = false;
+        _submitError = e.toString();
       });
     }
   }
@@ -337,33 +389,129 @@ class _CredentialPageState extends State<CredentialPage> {
             const SizedBox(height: 12),
           ],
 
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _pipelineRunning ? null : _runFullPipeline,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.indigo,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+          if (_submitError != null)
+            Card(
+              color: Colors.red.shade50,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    Icon(Icons.error_outline,
+                        color: Colors.red.shade700, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text('Submit error: $_submitError',
+                          style: TextStyle(
+                              color: Colors.red.shade800, fontSize: 13)),
+                    ),
+                  ],
                 ),
               ),
-              icon: _pipelineRunning
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.play_circle_filled),
-              label: Text(
-                _pipelineRunning ? 'Running…' : 'Generate ZK Proof',
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+
+          if (_submitResult != null)
+            Card(
+              color: Colors.green.shade50,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Icon(Icons.check_circle,
+                          color: Colors.green.shade700, size: 18),
+                      const SizedBox(width: 8),
+                      Text('Proof submitted',
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.green.shade800)),
+                    ]),
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      _submitResult!,
+                      style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: Colors.green.shade900),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
+
+          if (_submitResult != null) const SizedBox(height: 12),
+          if (_submitError != null) const SizedBox(height: 12),
+
+          if (!_pipelineDone)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _pipelineRunning ? null : _runFullPipeline,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.indigo,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: _pipelineRunning
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.play_circle_filled),
+                label: Text(
+                  _pipelineRunning ? 'Running…' : 'Generate ZK Proof',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+
+          if (_pipelineDone)
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _submitting ? null : _submitProof,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _submitResult != null
+                      ? Colors.green.shade700
+                      : Colors.teal.shade700,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: _submitting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : Icon(_submitResult != null
+                        ? Icons.check_circle
+                        : Icons.upload_outlined),
+                label: Text(
+                  _submitting
+                      ? 'Submitting…'
+                      : _submitResult != null
+                          ? 'Proof Submitted'
+                          : 'Submit Proof',
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+
           const SizedBox(height: 16),
         ],
       ),
