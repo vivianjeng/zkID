@@ -1,10 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:mopro_flutter_bindings/src/rust/frb_generated.dart';
+
+import 'credential_page.dart';
 import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.dart'
     show
         BenchmarkResults,
@@ -21,6 +27,8 @@ import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.da
         verifyJwt,
         verifyShow;
 
+final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
 // Real vc+sd-jwt credential — Taiwan government wallet demo, alg ES256, no disclosures.
 // Issuer public key "key-1" coordinates (decimal); verified against the live JWK Set.
 const String _kIssuerPubkeyX =
@@ -31,6 +39,88 @@ const String _kCredentialJwt =
     'eyJqa3UiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9rZXlzIiwia2lkIjoia2V5LTEiLCJ0eXAiOiJ2YytzZC1qd3QiLCJhbGciOiJFUzI1NiJ9'
     '.eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDI0b3g3cVp4NmJ2TndENzNja2lXZkRCQzV5NHpnckNMdVRuMXBNQnpGWFBIdHVXUDEyY1lQRmRSdjQ5MlE4WDFYZVoyeVg3U1pZWDloV1RaV0F2QXpUWFMydkJIakI2QnhxOGZGeEd5ZTRTd1dtcWdaODZRU3lkd2hoRHU5eTZLV2dlZDlhVkFlTFpjbUNXTHFzZ21CVUJDaG50SGdvSHhtczVadXZDTFUiLCJuYmYiOjE3Nzg1MTUyMDAsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUzWkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJqd2siOnsieSI6Ilpza1oyQ2dmWWpDZWpDaUFNdzNnZ3JReHZ2TlJNLUpOTEtWU0xEcjNjdWsiLCJ4IjoiVkZCd1k3cFg3ZEI0RDF5YXNwYVRIM0luTElLeURCUUU5OFRSVzNISGRmbyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYifX0sImV4cCI6MTc3OTIwNjM5OSwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwidHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX2RlbW8iXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIsImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfZGVtby9yMCMxOCIsInN0YXR1c0xpc3RJbmRleCI6IjE4Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF9kZW1vL3IwIiwic3RhdHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL2RlbW8vVjEvZjFlYTllMTQtNzdhNy00MzRlLWI3MDEtZjhkYjViMGMzMDJkIiwidHlwZSI6Ikpzb25TY2hlbWEifSwiY3JlZGVudGlhbFN1YmplY3QiOnsiX3NkIjpbIjdqcnJDdFlsamJYQ3ZvckpZUXlyNnNZVDVVTzBoYW9ZT1BnUGtGc0U4WkkiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiR1c4N1dZOTAiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVkZW50aWFsLzExMzdkN2RmLTU3YzgtNDU3NS05NjViLTgxZjNkOTE4NTg4OSJ9'
     '.uaSHN7nXORtfcU9PjSaDPdEZ7kqvFbz5sZsqjT2iIFCMPVwgSp8OcoqUSYqu2_TLpYVEk3niIGHp5aZoBwmGHw';
+
+// ── QR Code Parsing (mirrors iOS ParseLinkManager) ──────────────────────────
+
+enum QrResultType { parseVC, parseVP, staticVC, staticVP, error }
+
+class QrParseResult {
+  final QrResultType type;
+  final String? data;
+  final String? errorMessage;
+  const QrParseResult({required this.type, this.data, this.errorMessage});
+}
+
+QrParseResult _parseQrCodeUrl(String text) {
+  final uri = Uri.tryParse(text);
+  if (uri == null) return QrParseResult(type: QrResultType.error, errorMessage: 'Invalid URL');
+  if (uri.scheme == 'https') return _handleUniversalLink(uri);
+  if (uri.scheme == 'modadigitalwallet') return _handleDeepLink(uri);
+  return QrParseResult(type: QrResultType.error, errorMessage: 'Unknown scheme: ${uri.scheme}');
+}
+
+QrParseResult _handleUniversalLink(Uri uri) {
+  final mode = uri.queryParameters['mode'];
+  if (mode == null) return QrParseResult(type: QrResultType.error, errorMessage: 'Missing mode');
+  if (uri.path == '/api/moda/qrcode') {
+    if (mode == 'vc') return QrParseResult(type: QrResultType.staticVC, data: uri.queryParameters['vcUid'] ?? '');
+    if (mode == 'vp') return QrParseResult(type: QrResultType.staticVP, data: uri.queryParameters['vpUid'] ?? '');
+  } else if (uri.path == '/api/moda/vcqrcode' && mode == 'vc01') {
+    return QrParseResult(type: QrResultType.parseVC, data: _decodeDeeplink(uri.queryParameters['deeplink'] ?? ''));
+  } else if (uri.path == '/api/moda/vpqrcode' && mode == 'vp01') {
+    return QrParseResult(type: QrResultType.parseVP, data: _decodeDeeplink(uri.queryParameters['deeplink'] ?? ''));
+  }
+  return QrParseResult(type: QrResultType.error, errorMessage: 'Unrecognized path/mode: ${uri.path}?mode=$mode');
+}
+
+QrParseResult _handleDeepLink(Uri uri) {
+  if (uri.host == 'credential_offer') return QrParseResult(type: QrResultType.parseVC, data: uri.toString());
+  if (uri.host == 'authorize') return QrParseResult(type: QrResultType.parseVP, data: uri.toString());
+  return QrParseResult(type: QrResultType.error, errorMessage: 'Unknown host: ${uri.host}');
+}
+
+// Decodes URL-safe base64-encoded deeplink parameter (matches iOS decodeInnerDeeplink).
+String _decodeDeeplink(String encoded) {
+  try {
+    final decoded = Uri.decodeComponent(encoded);
+    final standard = decoded.replaceAll('-', '+').replaceAll('_', '/');
+    final rem = standard.length % 4;
+    final padded = rem == 0 ? standard : standard + '=' * (4 - rem);
+    return utf8.decode(base64Decode(padded));
+  } catch (_) {
+    return encoded;
+  }
+}
+
+// Builds the modadigitalwallet:// URI to launch for each parse result type.
+// Appends openac_callback=openac://jwt to VC/VP wallet URIs so modadigitalwallet
+// can redirect back to this app after the user confirms.
+Uri? _walletUri(QrParseResult r) {
+  switch (r.type) {
+    case QrResultType.parseVC:
+    case QrResultType.parseVP:
+      if (r.data == null) return null;
+      final base = Uri.tryParse(r.data!);
+      if (base == null) return null;
+      final params = Map<String, String>.from(base.queryParameters)
+        ..['openac_callback'] = 'openac://zkproof';
+      return base.replace(queryParameters: params);
+    case QrResultType.staticVC:
+      return Uri(
+        scheme: 'modadigitalwallet',
+        host: 'credential_offer',
+        queryParameters: {'vcUid': r.data ?? ''},
+      );
+    case QrResultType.staticVP:
+      return Uri(
+        scheme: 'modadigitalwallet',
+        host: 'authorize',
+        queryParameters: {'vpUid': r.data ?? ''},
+      );
+    case QrResultType.error:
+      return null;
+  }
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -84,6 +174,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: _navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
       home: const E2EProofWorkflowScreen(),
@@ -155,6 +246,44 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   bool _generatingShowInput = false;
   String? _showInputStatus;
   String? _showInputError;
+
+  StreamSubscription<Uri>? _linkSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _initDeepLinks();
+  }
+
+  @override
+  void dispose() {
+    _linkSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _initDeepLinks() async {
+    final appLinks = AppLinks();
+    // Handle the link that launched the app cold.
+    final initial = await appLinks.getInitialLink();
+    if (initial != null) _handleIncomingLink(initial);
+    // Handle links while the app is already running.
+    _linkSub = appLinks.uriLinkStream.listen(_handleIncomingLink);
+  }
+
+  void _handleIncomingLink(Uri uri) {
+    if (uri.scheme != 'openac' || uri.host != 'zkproof') return;
+    final vc = uri.queryParameters['vc'];
+    if (vc == null || vc.isEmpty) return;
+    final jwtPart = vc.split('~').first;
+    debugPrint('[DeepLink] received sdJwt length=${vc.length}');
+    debugPrint('[DeepLink] jwt part: $jwtPart');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => CredentialPage(sdJwt: vc),
+      ));
+    });
+  }
 
   Future<String> _getDocumentsPath() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -779,6 +908,21 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              onPressed: _isOperating
+                  ? null
+                  : () => Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+                      ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.teal,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.all(14),
+              ),
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan QR Code'),
+            ),
             if (_workflowRunning && _currentWorkflowStep != null) ...[
               const SizedBox(height: 10),
               Row(
@@ -1238,5 +1382,300 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
             textAlign: TextAlign.right),
       ),
     ]);
+  }
+}
+
+// ── QR Scanner Screen ────────────────────────────────────────────────────────
+
+class QrScannerScreen extends StatefulWidget {
+  const QrScannerScreen({super.key});
+
+  @override
+  State<QrScannerScreen> createState() => _QrScannerScreenState();
+}
+
+class _QrScannerScreenState extends State<QrScannerScreen> {
+  final _controller = MobileScannerController();
+  QrParseResult? _result;
+  String? _rawText;
+  bool _launching = false;
+  String? _launchError;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_result != null) return;
+    final raw = capture.barcodes.firstOrNull?.rawValue;
+    if (raw == null) return;
+    _controller.stop();
+    final parsed = _parseQrCodeUrl(raw);
+    setState(() {
+      _rawText = raw;
+      _result = parsed;
+    });
+    // Auto-launch wallet app for non-error results.
+    if (parsed.type != QrResultType.error) {
+      _openWallet(parsed);
+    }
+  }
+
+  Future<void> _openWallet(QrParseResult r) async {
+    final uri = _walletUri(r);
+    if (uri == null) return;
+    setState(() {
+      _launching = true;
+      _launchError = null;
+    });
+    try {
+      final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched && mounted) {
+        setState(() => _launchError = 'Could not open wallet app.\nMake sure modadigitalwallet is installed.');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _launchError = e.toString());
+    } finally {
+      if (mounted) setState(() => _launching = false);
+    }
+  }
+
+  void _rescan() {
+    setState(() {
+      _result = null;
+      _rawText = null;
+      _launchError = null;
+      _launching = false;
+    });
+    _controller.start();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Scan QR Code'),
+        actions: [
+          if (_result != null)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: _rescan,
+              tooltip: 'Scan again',
+            ),
+        ],
+      ),
+      body: _result != null ? _buildResult(context) : _buildScanner(),
+    );
+  }
+
+  Widget _buildScanner() {
+    return Stack(
+      children: [
+        MobileScanner(controller: _controller, onDetect: _onDetect),
+        Center(
+          child: Container(
+            width: 260,
+            height: 260,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.white, width: 3),
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+        ),
+        const Positioned(
+          bottom: 48,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Text(
+              'Point camera at a QR code',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                shadows: [Shadow(blurRadius: 6, color: Colors.black54)],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildResult(BuildContext context) {
+    final r = _result!;
+    final walletUri = _walletUri(r);
+
+    final (icon, color, title, subtitle) = switch (r.type) {
+      QrResultType.parseVC => (
+          Icons.card_membership,
+          Colors.green.shade700,
+          'Verifiable Credential',
+          'Credential issuance request (OID4VCI)',
+        ),
+      QrResultType.parseVP => (
+          Icons.verified_user,
+          Colors.blue.shade700,
+          'Verifiable Presentation',
+          'Presentation request (OID4VP)',
+        ),
+      QrResultType.staticVC => (
+          Icons.credit_card,
+          Colors.teal.shade700,
+          'Static VC QR Code',
+          'VC UID: ${r.data ?? ""}',
+        ),
+      QrResultType.staticVP => (
+          Icons.qr_code,
+          Colors.purple.shade700,
+          'Static VP QR Code',
+          'VP UID: ${r.data ?? ""}',
+        ),
+      QrResultType.error => (
+          Icons.error_outline,
+          Colors.red.shade700,
+          'Parse Error',
+          r.errorMessage ?? 'Unknown error',
+        ),
+    };
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ── Type badge card ──────────────────────────────────────────
+          Card(
+            color: color.withValues(alpha: 0.08),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: color.withValues(alpha: 0.5), width: 1.5),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                children: [
+                  Icon(icon, color: color, size: 52),
+                  const SizedBox(height: 12),
+                  Text(title,
+                      style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: color)),
+                  const SizedBox(height: 6),
+                  Text(subtitle,
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+                      textAlign: TextAlign.center),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // ── Wallet deep link card ────────────────────────────────────
+          if (walletUri != null) ...[
+            Text('Wallet Deep Link',
+                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey.shade800)),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: SelectableText(
+                walletUri.toString(),
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          // ── Launch status / error ────────────────────────────────────
+          if (_launching)
+            const Center(child: CircularProgressIndicator())
+          else if (_launchError != null)
+            Card(
+              color: Colors.red.shade50,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.error, color: Colors.red.shade700, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(_launchError!,
+                          style: TextStyle(color: Colors.red.shade800, fontSize: 13)),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else if (walletUri != null && r.type != QrResultType.error)
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green.shade600, size: 18),
+                const SizedBox(width: 8),
+                Text('Opening modadigitalwallet…',
+                    style: TextStyle(color: Colors.green.shade700, fontSize: 13)),
+              ],
+            ),
+
+          const SizedBox(height: 20),
+
+          // ── Raw QR ───────────────────────────────────────────────────
+          if (_rawText != null) ...[
+            Text('Raw QR Data',
+                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey.shade800)),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: SelectableText(
+                _rawText!,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+            const SizedBox(height: 20),
+          ],
+
+          // ── Actions ──────────────────────────────────────────────────
+          if (walletUri != null)
+            ElevatedButton.icon(
+              onPressed: _launching ? null : () => _openWallet(r),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: color,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.all(14),
+              ),
+              icon: const Icon(Icons.open_in_new),
+              label: const Text('Open in modadigitalwallet'),
+            ),
+          const SizedBox(height: 10),
+          ElevatedButton.icon(
+            onPressed: _rescan,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.teal,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.all(14),
+            ),
+            icon: const Icon(Icons.qr_code_scanner),
+            label: const Text('Scan Another QR Code'),
+          ),
+          const SizedBox(height: 10),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Back to Pipeline'),
+          ),
+        ],
+      ),
+    );
   }
 }
