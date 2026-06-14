@@ -7,7 +7,7 @@ features = [
     "flutter",
     "native-zk",
 ]
-path = "../.."
+path = "/Users/zhengyawen/Documents/GitHub/pse/zkID/wallet-unit-poc/mobile"
 version = "0.1.0"
 
 [lib]

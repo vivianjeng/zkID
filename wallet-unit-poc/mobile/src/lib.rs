@@ -103,6 +103,12 @@ impl std::fmt::Display for ZkProofError {
 
 impl std::error::Error for ZkProofError {}
 
+impl ZkProofError {
+    pub fn message(&self) -> String {
+        format!("{}", self)
+    }
+}
+
 impl From<std::io::Error> for ZkProofError {
     fn from(e: std::io::Error) -> Self {
         ZkProofError::IoError {
@@ -120,7 +126,7 @@ fn make_config(documents_path: &str) -> PathConfig {
     PathConfig {
         base_dir: documents_path.into(),
         is_mobile: true,
-        circuit_size: CircuitSize::Kb2,
+        circuit_size: CircuitSize::Kb4,
     }
 }
 
@@ -714,8 +720,8 @@ fn sha256_pad(msg: &[u8], max_len: usize) -> Result<(Vec<u8>, usize), ZkProofErr
 /// Generate the Prepare (JWT) circuit input JSON for a `vc+sd-jwt` credential.
 ///
 /// Returns a JSON string ready to write to `prepare_input.json` and pass to
-/// [`prove_prepare`].  Circuit params are fixed at the **2k** variant:
-/// `maxMessageLength=2048`, `maxMatches=4`, `maxSubstringLength=50`,
+/// [`prove_prepare`].  Circuit params are fixed at the **4k** variant:
+/// `maxMessageLength=4096`, `maxMatches=4`, `maxSubstringLength=50`,
 /// `maxClaims=2`, `maxClaimLength=128`.
 ///
 /// Parameters:
@@ -731,7 +737,7 @@ pub fn generate_prepare_input(
     use num_bigint::BigUint;
     use std::str::FromStr;
 
-    const MAX_MSG_LEN: usize = 2048;
+    const MAX_MSG_LEN: usize = 4096;
     const MAX_MATCHES: usize = 4;
     const MAX_SUBSTR_LEN: usize = 50;
     const MAX_CLAIMS: usize = 2; // MAX_MATCHES - 2
@@ -853,7 +859,7 @@ pub fn generate_prepare_input(
 /// Generate the Show circuit input JSON for a credential presentation.
 ///
 /// Returns a JSON string ready to write to `show_input.json` and pass to
-/// [`prove_show`].  Circuit params are fixed at the **2k** variant:
+/// [`prove_show`].  Circuit params are fixed at the **4k** variant:
 /// `nClaims=2`, `maxPredicates=2`, `maxLogicTokens=8`.
 ///
 /// Parameters:
@@ -1031,9 +1037,9 @@ mod tests {
     }
 
     #[test]
-    fn test_make_config_uses_2k() {
+    fn test_make_config_uses_4k() {
         let config = make_config("/docs");
-        assert_eq!(config.circuit_size, CircuitSize::Kb2);
+        assert_eq!(config.circuit_size, CircuitSize::Kb4);
         assert!(config.is_mobile);
     }
 
@@ -1066,9 +1072,9 @@ mod e2e_tests {
     /// Builds a temp directory tree that matches the mobile app's document structure:
     ///
     ///   {temp}/circom/                          ← documents_path passed to Rust FFI
-    ///     build/jwt/jwt_js/jwt.r1cs             ← jwt_2k r1cs, using mobile-style name
+    ///     build/jwt/jwt_js/jwt.r1cs             ← jwt_4k r1cs, using mobile-style name
     ///     build/show/show_js/show.r1cs
-    ///     jwt_input.json                        ← 2k JWT inputs (for prove_jwt + run_complete_benchmark)
+    ///     jwt_input.json                        ← 4k JWT inputs (for prove_jwt + run_complete_benchmark)
     ///     show_input.json                       ← show inputs (for prove_show + run_complete_benchmark)
     ///
     /// Returns the documents_path string.
@@ -1082,23 +1088,23 @@ mod e2e_tests {
         fs::create_dir_all(&show_dir).expect("create show dir");
 
         fs::copy(
-            circom.join("build/jwt_2k/jwt_2k_js/jwt_2k.r1cs"),
+            circom.join("build/jwt_4k/jwt_4k_js/jwt_4k.r1cs"),
             jwt_dir.join("jwt.r1cs"),
         )
-        .expect("copy jwt_2k.r1cs -> jwt.r1cs");
+        .expect("copy jwt_4k.r1cs -> jwt.r1cs");
         fs::copy(
             circom.join("build/show/show_js/show.r1cs"),
             show_dir.join("show.r1cs"),
         )
         .expect("copy show.r1cs");
 
-        let jwt_2k_input = circom.join("inputs/jwt/2k/default.json");
-        let show_input = circom.join("inputs/show/2k/default.json");
+        let jwt_4k_input = circom.join("inputs/jwt/4k/default.json");
+        let show_input = circom.join("inputs/show/4k/default.json");
 
-        fs::copy(&jwt_2k_input, docs.join("jwt_input.json"))
-            .expect("copy jwt 2k input -> jwt_input.json");
+        fs::copy(&jwt_4k_input, docs.join("jwt_input.json"))
+            .expect("copy jwt 4k input -> jwt_input.json");
         fs::copy(&show_input, docs.join("show_input.json"))
-            .expect("copy show 2k input -> show_input.json");
+            .expect("copy show 4k input -> show_input.json");
 
         docs.to_string_lossy().into_owned()
     }
@@ -1186,11 +1192,29 @@ mod e2e_tests {
     // Real-credential prove tests
     // =========================================================================
 
-    /// Full JWT credential issued by the Taiwan government wallet demo issuer.
+    /// Real vc+sd-jwt issued by issuer-vc.wallet.gov.tw (kid: key-1, alg: ES256).
+    /// Extracted from vp.verifiableCredential[0] of a live MODA wallet presentation
+    /// (2026-06-05). Type: 00000000_vpms_20250605. Signing input: 2145 bytes (fits 4k).
+    /// cnf.jwk: x=H32qvUPZeG_ZYjo9YveUX1Pd3PzR53uojabE1LMoUm0
+    ///           y=5sPwNmz2MRwjUzfX7PMonZioyVNr7J_JVuWgRFti_z4
     const CREDENTIAL_JWT: &str =
         "eyJqa3UiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9rZXlzIiwia2lkIjoia2V5LTEiLCJ0eXAiOiJ2YytzZC1qd3QiLCJhbGciOiJFUzI1NiJ9\
-         .eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDI0b3g3cVp4NmJ2TndENzNja2lXZkRCQzV5NHpnckNMdVRuMXBNQnpGWFBIdHVXUDEyY1lQRmRSdjQ5MlE4WDFYZVoyeVg3U1pZWDloV1RaV0F2QXpUWFMydkJIakI2QnhxOGZGeEd5ZTRTd1dtcWdaODZRU3lkd2hoRHU5eTZLV2dlZDlhVkFlTFpjbUNXTHFzZ21CVUJDaG50SGdvSHhtczVadXZDTFUiLCJuYmYiOjE3Nzg1MTUyMDAsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUzWkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJqd2siOnsieSI6Ilpza1oyQ2dmWWpDZWpDaUFNdzNnZ3JReHZ2TlJNLUpOTEtWU0xEcjNjdWsiLCJ4IjoiVkZCd1k3cFg3ZEI0RDF5YXNwYVRIM0luTElLeURCUUU5OFRSVzNISGRmbyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYifX0sImV4cCI6MTc3OTIwNjM5OSwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwidHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX2RlbW8iXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIsImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfZGVtby9yMCMxOCIsInN0YXR1c0xpc3RJbmRleCI6IjE4Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF9kZW1vL3IwIiwic3RhdHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL2RlbW8vVjEvZjFlYTllMTQtNzdhNy00MzRlLWI3MDEtZjhkYjViMGMzMDJkIiwidHlwZSI6Ikpzb25TY2hlbWEifSwiY3JlZGVudGlhbFN1YmplY3QiOnsiX3NkIjpbIjdqcnJDdFlsamJYQ3ZvckpZUXlyNnNZVDVVTzBoYW9ZT1BnUGtGc0U4WkkiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiR1c4N1dZOTAiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVkZW50aWFsLzExMzdkN2RmLTU3YzgtNDU3NS05NjViLTgxZjNkOTE4NTg4OSJ9\
-         .uaSHN7nXORtfcU9PjSaDPdEZ7kqvFbz5sZsqjT2iIFCMPVwgSp8OcoqUSYqu2_TLpYVEk3niIGHp5aZoBwmGHw";
+.eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDFBQ21ISENza0xnNUNuVmVxVkZHVTc4VmJMWWplQ1dzRXhEenlqNDI5RVNnNGZyQjI0b2tXSmdoNlN1TFVnMWR4OWg1NFBFNWdITXRY\
+THV5aWg3UlRheXg4QUZWY241VUNRRFpIQkNoWUNUQ1FIeFl5cnhxN21FSkd3TEdGUFJ6cUJLV3k2VUUxcmFQRTZDSkVlVzVQd295cnpqU0x0NUMxVFZhaTVxdWUiLCJuYmYiOjE3ODA1\
+Nzg4NTQsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUz\
+WkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJq\
+d2siOnsieCI6IkgzMnF2VVBaZUdfWllqbzlZdmVVWDFQZDNQelI1M3VvamFiRTFMTW9VbTAiLCJjcnYiOiJQLTI1NiIsInkiOiI1c1B3Tm16Mk1Sd2pVemZYN1BNb25aaW95Vk5yN0pf\
+SlZ1V2dSRnRpX3o0Iiwia3R5IjoiRUMifX0sImV4cCI6NDkwNDcxNjQ1NCwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwi\
+dHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX3ZwbXNfMjAyNTA2MDUiXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIs\
+ImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfdnBtc18yMDI1MDYwNS9yMCM2MSIsInN0YXR1c0xpc3RJbmRleCI6IjYx\
+Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF92cG1zXzIwMjUwNjA1L3IwIiwic3Rh\
+dHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL3Zw\
+bXMyMDI1MDYwNS9WMS9lYjYzODQxMi0zMGU3LTRlODYtYTRjNi1mMjg4ZGEyZjRkNjMiLCJ0eXBlIjoiSnNvblNjaGVtYSJ9LCJjcmVkZW50aWFsU3ViamVjdCI6eyJfc2QiOlsiLXNt\
+Um9TRzd0UDBhRmQzcmM1dWFWRTZpSkk5ZFRuZW5TTk11QVV5dURYNCIsIjRRZkdrdWR1N2xaWDJoRTNBb1FkOFY3YmJZUVVzeFRPYVpSWmRKWmtWcjgiLCJNTGZsOUE5ZjNHR0pjZDNf\
+NEZ1LVU5YnEzZUZWOUFPS1BwQjQzWkNYel9RIiwiWjc5bi1Ed0tuZDhReHpoMFB2YzNfNV9TZ0ZmenpLcUxMUjhlZUx6NkFwcyIsIno0bUhWS2NqdmZ0YWVoaE5OZUQxVFU4V2x2WkF0\
+U1dxVV9NbGRmZGpWZFUiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiMlk1QVJNM1EiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVk\
+ZW50aWFsL2U3YjY3NWZmLTRkNDAtNDIzMi04NThkLWUwYTNjMjVhM2I2ZCJ9\
+.R_T5Kp1CvTHigJkZGxoANTvfH3NI-JdAIe8s2jwxrFg8gT13psr4VuAL8i5ALQewMQ5NIMBgzdiKeq1sWNgEZw";
 
     /// Issuer public key (kid: "key-1") fetched from https://issuer-vc.wallet.gov.tw/api/keys.
     /// x = base64url_decode("dnQ2W9ZTsILYac3XdcvxrYNgIgjSkGJUMecMXVJk7XM") → big-endian uint
@@ -1213,10 +1237,10 @@ mod e2e_tests {
         let v: serde_json::Value =
             serde_json::from_str(&json_str).expect("output is valid JSON");
 
-        // message must be 2048 elements
-        assert_eq!(v["message"].as_array().unwrap().len(), 2048);
-        // SHA-256 padded length for a 1853-byte signing input = 1920
-        assert_eq!(v["messageLength"].as_u64().unwrap(), 1920);
+        // message must be 4096 elements
+        assert_eq!(v["message"].as_array().unwrap().len(), 4096);
+        // SHA-256 padded length for a 2145-byte signing input = 2176
+        assert_eq!(v["messageLength"].as_u64().unwrap(), 2176);
         // Header is 128 base64url chars → period at index 128
         assert_eq!(v["periodIndex"].as_u64().unwrap(), 128);
         // Always 2 built-in patterns
@@ -1262,15 +1286,15 @@ mod e2e_tests {
         let v: serde_json::Value = serde_json::from_str(&json_str).expect("output is valid JSON");
 
         // Device key extracted from CREDENTIAL_JWT cnf.jwk.x/y
-        // x = "VFBwY7pX7dB4D1yaspaTH3InLIKyDBQE98TRW3HHdfo" → decimal
+        // x = "H32qvUPZeG_ZYjo9YveUX1Pd3PzR53uojabE1LMoUm0" → decimal
         assert_eq!(
             v["deviceKeyX"].as_str().unwrap(),
-            "38136402730426466088154311719490189169588191256961835765279803538047096026618"
+            "14243732588632816266767589740520232407876451095741750343898049083578956403309"
         );
-        // y = "ZskZ2CgfYjCejCiAMw3ggrQxvvNRM-JNLKVSLDr3cuk" → decimal
+        // y = "5sPwNmz2MRwjUzfX7PMonZioyVNr7J_JVuWgRFti_z4" → decimal
         assert_eq!(
             v["deviceKeyY"].as_str().unwrap(),
-            "46491225186746178845136509364803319928629564288412740419483917566167058182889"
+            "104378148238218408978645448943153702691292549136592630116702416760741755551550"
         );
 
         // messageHash = SHA-256("test-nonce") mod n — must be a non-zero decimal string
@@ -1320,9 +1344,9 @@ mod e2e_tests {
         let prepare_path = PathBuf::from(&docs).join("prepare_input.json");
         fs::write(&prepare_path, &prepare_json).expect("write prepare_input.json");
 
-        // Step 1: Setup Prepare keys
-        let r = setup_prepare_keys(docs.clone());
-        assert!(r.is_ok(), "setup_prepare_keys failed: {:?}", r.err());
+        // Step 1: Setup JWT keys
+        let r = setup_jwt_keys(docs.clone());
+        assert!(r.is_ok(), "setup_jwt_keys failed: {:?}", r.err());
 
         // Step 2: Setup Show keys
         let r = setup_show_keys(docs.clone());
@@ -1332,9 +1356,9 @@ mod e2e_tests {
         let r = generate_shared_blinds(docs.clone());
         assert!(r.is_ok(), "generate_shared_blinds failed: {:?}", r.err());
 
-        // Step 4: Prove Prepare (real credential)
-        let r = prove_prepare(docs.clone());
-        assert!(r.is_ok(), "prove_prepare failed: {:?}", r.err());
+        // Step 4: Prove JWT (real credential)
+        let r = prove_jwt(docs.clone());
+        assert!(r.is_ok(), "prove_jwt failed: {:?}", r.err());
         let pr = r.unwrap();
         assert!(pr.proof_size_bytes > 0, "prepare proof must be non-empty");
         assert!(!pr.comm_w_shared.is_empty(), "prepare comm_w_shared must be non-empty");
@@ -1358,9 +1382,9 @@ mod e2e_tests {
             &sr.comm_w_shared[..sr.comm_w_shared.len().min(60)]
         );
 
-        // Step 6: Verify Prepare
-        let r = verify_prepare(docs.clone());
-        assert!(r.is_ok(), "verify_prepare failed: {:?}", r.err());
+        // Step 6: Verify JWT
+        let r = verify_jwt(docs.clone());
+        assert!(r.is_ok(), "verify_jwt failed: {:?}", r.err());
         assert!(r.unwrap(), "prepare proof must verify");
 
         // Step 7: Verify Show

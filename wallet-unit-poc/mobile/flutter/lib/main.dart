@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' show Random;
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart' show Uint64List;
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -17,25 +18,36 @@ import 'package:mopro_flutter_bindings/src/rust/third_party/openac_mobile_app.da
     show
         BenchmarkResults,
         ProofResult,
+        ZkProofError,
         generatePrepareInput,
+        generateShowInput,
         generateSharedBlinds,
         proveJwt,
         proveShow,
         reblindJwt,
         reblindShow,
         runCompleteBenchmark,
-        setupJwtKeys,
-        setupShowKeys,
         verifyJwt,
         verifyShow;
 
 final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 
+Future<String> _zkErrorMessage(dynamic e) async =>
+    e is ZkProofError ? await e.message() : e.toString();
+
 // Set just before launching the government wallet so the returning deep link
 // can carry the verifier's transaction ID through to CredentialPage.
 String? _pendingTransactionId;
 
-// Real vc+sd-jwt credential — Taiwan government wallet demo, alg ES256, no disclosures.
+// Set when a VP token arrives from the MODA wallet (in _extractAndPrepare).
+// These are used by _generateAndWriteShowInput() to prove real device binding.
+// _pendingVpSigningInput = "{header_b64}.{payload_b64}" (JWT signing input)
+// _pendingVpDeviceSig   = base64url ES256 signature over SHA-256(signing_input)
+String? _pendingVpSigningInput;
+String? _pendingVpDeviceSig;
+
+// Real vc+sd-jwt — issuer-vc.wallet.gov.tw, kid key-1, alg ES256.
+// Type: 00000000_vpms_20250605. cnf.jwk: x=H32qvUPZeG…, y=5sPwNmz2MR…
 // Issuer public key "key-1" coordinates (decimal); verified against the live JWK Set.
 const String _kIssuerPubkeyX =
     '53578245562568858090497762971050088637552636662548898700080252253957930675571';
@@ -43,8 +55,22 @@ const String _kIssuerPubkeyY =
     '94717717123739987908966931526384127659809793164315839803856846695569747893398';
 const String _kCredentialJwt =
     'eyJqa3UiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9rZXlzIiwia2lkIjoia2V5LTEiLCJ0eXAiOiJ2YytzZC1qd3QiLCJhbGciOiJFUzI1NiJ9'
-    '.eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDI0b3g3cVp4NmJ2TndENzNja2lXZkRCQzV5NHpnckNMdVRuMXBNQnpGWFBIdHVXUDEyY1lQRmRSdjQ5MlE4WDFYZVoyeVg3U1pZWDloV1RaV0F2QXpUWFMydkJIakI2QnhxOGZGeEd5ZTRTd1dtcWdaODZRU3lkd2hoRHU5eTZLV2dlZDlhVkFlTFpjbUNXTHFzZ21CVUJDaG50SGdvSHhtczVadXZDTFUiLCJuYmYiOjE3Nzg1MTUyMDAsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUzWkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJqd2siOnsieSI6Ilpza1oyQ2dmWWpDZWpDaUFNdzNnZ3JReHZ2TlJNLUpOTEtWU0xEcjNjdWsiLCJ4IjoiVkZCd1k3cFg3ZEI0RDF5YXNwYVRIM0luTElLeURCUUU5OFRSVzNISGRmbyIsImt0eSI6IkVDIiwiY3J2IjoiUC0yNTYifX0sImV4cCI6MTc3OTIwNjM5OSwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwidHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX2RlbW8iXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIsImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfZGVtby9yMCMxOCIsInN0YXR1c0xpc3RJbmRleCI6IjE4Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF9kZW1vL3IwIiwic3RhdHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL2RlbW8vVjEvZjFlYTllMTQtNzdhNy00MzRlLWI3MDEtZjhkYjViMGMzMDJkIiwidHlwZSI6Ikpzb25TY2hlbWEifSwiY3JlZGVudGlhbFN1YmplY3QiOnsiX3NkIjpbIjdqcnJDdFlsamJYQ3ZvckpZUXlyNnNZVDVVTzBoYW9ZT1BnUGtGc0U4WkkiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiR1c4N1dZOTAiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVkZW50aWFsLzExMzdkN2RmLTU3YzgtNDU3NS05NjViLTgxZjNkOTE4NTg4OSJ9'
-    '.uaSHN7nXORtfcU9PjSaDPdEZ7kqvFbz5sZsqjT2iIFCMPVwgSp8OcoqUSYqu2_TLpYVEk3niIGHp5aZoBwmGHw';
+    '.eyJzdWIiOiJkaWQ6a2V5OnoyZG16RDgxZDFBQ21ISENza0xnNUNuVmVxVkZHVTc4VmJMWWplQ1dzRXhEenlqNDI5RVNnNGZyQjI0b2tXSmdoNlN1TFVnMWR4OWg1NFBFNWdITXRY'
+    'THV5aWg3UlRheXg4QUZWY241VUNRRFpIQkNoWUNUQ1FIeFl5cnhxN21FSkd3TEdGUFJ6cUJLV3k2VUUxcmFQRTZDSkVlVzVQd295cnpqU0x0NUMxVFZhaTVxdWUiLCJuYmYiOjE3ODA1'
+    'Nzg4NTQsImlzcyI6ImRpZDprZXk6ejJkbXpEODFjZ1B4OFZraTdKYnV1TW1GWXJXUGdZb3l0eWtVWjNleXFodDFqOUticlRRV1BUSk10MkZ1MTZIODR5bXdiYkc5TEdOaW5XN1luajUz'
+    'WkNBVzE2Z3JBaEJpd3Y1M0FuYnY3ODdodDZueGFLTUdHQWdZOVdqdEZ4WVozaGpHZE1kMVNodVFvU3ZOZVh4Y2o1SmNiazJ1WXRmR2J3aW9GU2laUVhmekg3Y3RoaSIsImNuZiI6eyJq'
+    'd2siOnsieCI6IkgzMnF2VVBaZUdfWllqbzlZdmVVWDFQZDNQelI1M3VvamFiRTFMTW9VbTAiLCJjcnYiOiJQLTI1NiIsInkiOiI1c1B3Tm16Mk1Sd2pVemZYN1BNb25aaW95Vk5yN0pf'
+    'SlZ1V2dSRnRpX3o0Iiwia3R5IjoiRUMifX0sImV4cCI6NDkwNDcxNjQ1NCwidmMiOnsiQGNvbnRleHQiOlsiaHR0cHM6Ly93d3cudzMub3JnLzIwMTgvY3JlZGVudGlhbHMvdjEiXSwi'
+    'dHlwZSI6WyJWZXJpZmlhYmxlQ3JlZGVudGlhbCIsIjAwMDAwMDAwX3ZwbXNfMjAyNTA2MDUiXSwiY3JlZGVudGlhbFN0YXR1cyI6eyJ0eXBlIjoiU3RhdHVzTGlzdDIwMjFFbnRyeSIs'
+    'ImlkIjoiaHR0cHM6Ly9pc3N1ZXItdmMud2FsbGV0Lmdvdi50dy9hcGkvc3RhdHVzLWxpc3QvMDAwMDAwMDBfdnBtc18yMDI1MDYwNS9yMCM2MSIsInN0YXR1c0xpc3RJbmRleCI6IjYx'
+    'Iiwic3RhdHVzTGlzdENyZWRlbnRpYWwiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9zdGF0dXMtbGlzdC8wMDAwMDAwMF92cG1zXzIwMjUwNjA1L3IwIiwic3Rh'
+    'dHVzUHVycG9zZSI6InJldm9jYXRpb24ifSwiY3JlZGVudGlhbFNjaGVtYSI6eyJpZCI6Imh0dHBzOi8vZnJvbnRlbmQud2FsbGV0Lmdvdi50dy9hcGkvc2NoZW1hLzAwMDAwMDAwL3Zw'
+    'bXMyMDI1MDYwNS9WMS9lYjYzODQxMi0zMGU3LTRlODYtYTRjNi1mMjg4ZGEyZjRkNjMiLCJ0eXBlIjoiSnNvblNjaGVtYSJ9LCJjcmVkZW50aWFsU3ViamVjdCI6eyJfc2QiOlsiLXNt'
+    'Um9TRzd0UDBhRmQzcmM1dWFWRTZpSkk5ZFRuZW5TTk11QVV5dURYNCIsIjRRZkdrdWR1N2xaWDJoRTNBb1FkOFY3YmJZUVVzeFRPYVpSWmRKWmtWcjgiLCJNTGZsOUE5ZjNHR0pjZDNf'
+    'NEZ1LVU5YnEzZUZWOUFPS1BwQjQzWkNYel9RIiwiWjc5bi1Ed0tuZDhReHpoMFB2YzNfNV9TZ0ZmenpLcUxMUjhlZUx6NkFwcyIsIno0bUhWS2NqdmZ0YWVoaE5OZUQxVFU4V2x2WkF0'
+    'U1dxVV9NbGRmZGpWZFUiXSwiX3NkX2FsZyI6InNoYS0yNTYifX0sIm5vbmNlIjoiMlk1QVJNM1EiLCJqdGkiOiJodHRwczovL2lzc3Vlci12Yy53YWxsZXQuZ292LnR3L2FwaS9jcmVk'
+    'ZW50aWFsL2U3YjY3NWZmLTRkNDAtNDIzMi04NThkLWUwYTNjMjVhM2I2ZCJ9'
+    '.R_T5Kp1CvTHigJkZGxoANTvfH3NI-JdAIe8s2jwxrFg8gT13psr4VuAL8i5ALQewMQ5NIMBgzdiKeq1sWNgEZw';
 
 // ── QR Code Parsing (mirrors iOS ParseLinkManager) ──────────────────────────
 
@@ -109,24 +135,31 @@ Future<void> main() async {
 /// Copy circuit files from Flutter assets into the app's documents directory,
 /// mirroring the layout used by Rust's PathConfig::mobile:
 ///
-///   {docs}/build/jwt/jwt_js/jwt.r1cs   ← decompressed from jwt.r1cs.gz
-///   {docs}/build/show/show_js/show.r1cs ← decompressed from show.r1cs.gz
-///   {docs}/jwt_input.json               ← prove_jwt + run_complete_benchmark
-///   {docs}/show_input.json              ← prove_show + run_complete_benchmark
+///   {docs}/circom/build/jwt/jwt_js/jwt.r1cs   ← decompressed from jwt.r1cs.gz
+///   {docs}/circom/build/show/show_js/show.r1cs ← decompressed from show.r1cs.gz
+///   {docs}/keys/prepare_proving.key            ← decompressed from 4k_prepare_proving.key.gz
+///   {docs}/keys/prepare_verifying.key          ← decompressed from 4k_prepare_verifying.key.gz
+///   {docs}/keys/show_proving.key               ← decompressed from 4k_show_proving.key.gz
+///   {docs}/keys/show_verifying.key             ← decompressed from 4k_show_verifying.key.gz
 Future<void> _copyAssetsToDocuments() async {
   try {
     final documentsDir = await getApplicationDocumentsDirectory();
     final circomDir = Directory('${documentsDir.path}/circom');
+    final keysDir = Directory('${documentsDir.path}/keys');
 
     final jwtBuildDir = Directory('${circomDir.path}/build/jwt/jwt_js');
     final showBuildDir = Directory('${circomDir.path}/build/show/show_js');
     await jwtBuildDir.create(recursive: true);
     await showBuildDir.create(recursive: true);
+    await keysDir.create(recursive: true);
 
-    // Decompress r1cs files — skip if already extracted (each is ~350MB).
     final compressedAssets = {
       'assets/circom/jwt.r1cs.gz': '${jwtBuildDir.path}/jwt.r1cs',
       'assets/circom/show.r1cs.gz': '${showBuildDir.path}/show.r1cs',
+      'assets/keys/4k_prepare_proving.key.gz': '${keysDir.path}/prepare_proving.key',
+      'assets/keys/4k_prepare_verifying.key.gz': '${keysDir.path}/prepare_verifying.key',
+      'assets/keys/4k_show_proving.key.gz': '${keysDir.path}/show_proving.key',
+      'assets/keys/4k_show_verifying.key.gz': '${keysDir.path}/show_verifying.key',
     };
     for (final entry in compressedAssets.entries) {
       final target = File(entry.value);
@@ -168,8 +201,6 @@ class E2EProofWorkflowScreen extends StatefulWidget {
 }
 
 enum ProofTaskType {
-  setupJwt,
-  setupShow,
   generateBlinds,
   proveJwt,
   proveShow,
@@ -265,32 +296,12 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
 
   Future<String> _getDocumentsPath() async {
     final dir = await getApplicationDocumentsDirectory();
-    return '${dir.path}/circom';
+    return dir.path;
   }
 
   Future<TaskResult> _executeStep(
       ProofTaskType taskType, String documentsPath) async {
     switch (taskType) {
-      case ProofTaskType.setupJwt:
-        final t = DateTime.now();
-        final msg = await setupJwtKeys(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          message: msg,
-          clientTimingMs: DateTime.now().difference(t).inMilliseconds,
-        );
-
-      case ProofTaskType.setupShow:
-        final t = DateTime.now();
-        final msg = await setupShowKeys(documentsPath: documentsPath);
-        return TaskResult(
-          taskType: taskType,
-          success: true,
-          message: msg,
-          clientTimingMs: DateTime.now().difference(t).inMilliseconds,
-        );
-
       case ProofTaskType.generateBlinds:
         final t = DateTime.now();
         final msg = await generateSharedBlinds(documentsPath: documentsPath);
@@ -352,7 +363,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
         issuerPubkeyX: _kIssuerPubkeyX,
         issuerPubkeyY: _kIssuerPubkeyY,
       );
-      await File('$docs/prepare_input.json').writeAsString(jsonStr);
+      await File('$docs/jwt_input.json').writeAsString(jsonStr);
       final data = jsonDecode(jsonStr) as Map<String, dynamic>;
       setState(() {
         _prepareInputStatus =
@@ -369,16 +380,16 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     }
   }
 
-  // Synthetic test vectors from circom/inputs/show/2k/default.json.
+  // Synthetic test vectors from circom/inputs/show/4k/default.json.
   // The Show circuit verifies device-key possession (ECDSA over nonce hash) independently
   // from the JWT's cnf.jwk; a valid proof requires the matching device private key, which
-  // is unavailable here. These pre-computed values satisfy all circuit constraints.
+  // is unavailable here. These pre-computed values satisfy all 4k circuit constraints.
   static const _kTestShowInput = {
-    'deviceKeyX': '70867448702559710706831157867104375348666111976485036757500306755907228884591',
-    'deviceKeyY': '95330439344815577998657911774240551168106261928322957515823793358082361230370',
-    'sig_r': '97632141132390985819876785886928667193064512393283543898194803008435992732086',
-    'sig_s_inverse': '106822633150040209395395885354646968871852125874546732758721975965629038861865',
-    'messageHash': '21526899450503750036093500952609951056866772331291366231662559071055169445756',
+    'deviceKeyX': '3235469921824929619667006482855853611393970393649187893408674476281226521848',
+    'deviceKeyY': '76077612271780672660977489200716927494983953737189345678969020897162074805789',
+    'sig_r': '32294691588770405271110282100373162390371747761899034323693438388417848650884',
+    'sig_s_inverse': '17410881328306032428067187457454160326934099535867317817093755989428511695672',
+    'messageHash': '103112455607070190239702750162666382343409356112044643088145721996033151411339',
     'predicateLen': '1',
     'claimValues': ['1040605', '0'],
     'predicateClaimRefs': ['0', '0'],
@@ -398,17 +409,49 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     });
     try {
       final docs = await _getDocumentsPath();
-      final jsonStr = jsonEncode(_kTestShowInput);
-      await File('$docs/show_input.json').writeAsString(jsonStr);
-      setState(() {
-        _showInputStatus =
-            'devKeyX=${(_kTestShowInput['deviceKeyX'] as String).substring(0, 8)}…  '
-            'msgHash=${(_kTestShowInput['messageHash'] as String).substring(0, 8)}…';
-        _generatingShowInput = false;
-      });
+      final vpSigningInput = _pendingVpSigningInput;
+      final vpDeviceSig = _pendingVpDeviceSig;
+
+      String jsonStr;
+      if (vpSigningInput != null && vpDeviceSig != null) {
+        // Use real VP JWT device binding — nonce = VP JWT signing input.
+        jsonStr = await generateShowInput(
+          jwt: _kCredentialJwt,
+          deviceSignature: vpDeviceSig,
+          nonce: vpSigningInput,
+          claimValues: ['0', '0'],
+          predicateLen: BigInt.zero,
+          predicateClaimRefs: Uint64List.fromList([0, 0]),
+          predicateOps: Uint64List.fromList([0, 0]),
+          predicateRhsIsRef: Uint64List.fromList([0, 0]),
+          predicateRhsValues: ['0', '0'],
+          exprLen: BigInt.zero,
+          tokenTypes: Uint64List.fromList([0, 0, 0, 0, 0, 0, 0, 0]),
+          tokenValues: Uint64List.fromList([0, 0, 0, 0, 0, 0, 0, 0]),
+        );
+        await File('$docs/show_input.json').writeAsString(jsonStr);
+        final data = jsonDecode(jsonStr) as Map<String, dynamic>;
+        final devKeyX = (data['deviceKeyX'] as String?)?.substring(0, 8) ?? '?';
+        final msgHash = (data['messageHash'] as String?)?.substring(0, 8) ?? '?';
+        setState(() {
+          _showInputStatus = '[real VP JWT] devKeyX=$devKeyX…  msgHash=$msgHash…';
+          _generatingShowInput = false;
+        });
+      } else {
+        // Fall back to pre-computed 4k test vectors when no VP token is available.
+        jsonStr = jsonEncode(_kTestShowInput);
+        await File('$docs/show_input.json').writeAsString(jsonStr);
+        setState(() {
+          _showInputStatus =
+              '[test vectors] devKeyX=${(_kTestShowInput['deviceKeyX'] as String).substring(0, 8)}…  '
+              'msgHash=${(_kTestShowInput['messageHash'] as String).substring(0, 8)}…';
+          _generatingShowInput = false;
+        });
+      }
     } catch (e) {
+      final msg = await _zkErrorMessage(e);
       setState(() {
-        _showInputError = e.toString();
+        _showInputError = msg;
         _generatingShowInput = false;
       });
     }
@@ -428,11 +471,12 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
         _isOperating = false;
       });
     } catch (e) {
+      final msg = await _zkErrorMessage(e);
       setState(() {
         _results[taskType.name] =
-            TaskResult(taskType: taskType, success: false, error: e.toString());
+            TaskResult(taskType: taskType, success: false, error: msg);
         _completedSteps[taskType.name] = false;
-        _error = Exception('${_taskTypeToDisplayName(taskType)} failed: $e');
+        _error = Exception('${_taskTypeToDisplayName(taskType)} failed: $msg');
         _isOperating = false;
       });
     }
@@ -454,7 +498,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     });
 
     // Step 1a: Generate prepare input
-    setState(() => _currentWorkflowStep = '1/11: Generate Prepare Input');
+    setState(() => _currentWorkflowStep = '1/9: Generate Prepare Input');
     await _generateAndWritePrepareInput();
     if (_prepareInputError != null) {
       setState(() {
@@ -467,7 +511,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
     }
 
     // Step 1b: Generate show input
-    setState(() => _currentWorkflowStep = '2/11: Generate Show Input');
+    setState(() => _currentWorkflowStep = '2/9: Generate Show Input');
     await _generateAndWriteShowInput();
     if (_showInputError != null) {
       setState(() {
@@ -481,8 +525,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
 
     final docs = await _getDocumentsPath();
     const steps = [
-      ProofTaskType.setupJwt,
-      ProofTaskType.setupShow,
       ProofTaskType.generateBlinds,
       ProofTaskType.proveJwt,
       ProofTaskType.reblindJwt,
@@ -496,7 +538,7 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
       final step = steps[i];
       setState(() {
         _currentWorkflowStep =
-            '${i + 3}/11: ${_taskTypeToDisplayName(step)}';
+            '${i + 3}/9: ${_taskTypeToDisplayName(step)}';
       });
       try {
         final result = await _executeStep(step, docs);
@@ -515,12 +557,13 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
           return;
         }
       } catch (e) {
+        final msg = await _zkErrorMessage(e);
         setState(() {
           _results[step.name] =
-              TaskResult(taskType: step, success: false, error: e.toString());
+              TaskResult(taskType: step, success: false, error: msg);
           _completedSteps[step.name] = false;
           _error = Exception(
-              'Pipeline stopped at ${_taskTypeToDisplayName(step)}: $e');
+              'Pipeline stopped at ${_taskTypeToDisplayName(step)}: $msg');
           _isOperating = false;
           _workflowRunning = false;
           _currentWorkflowStep = null;
@@ -575,8 +618,6 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
 
   String _taskTypeToDisplayName(ProofTaskType type) {
     return switch (type) {
-      ProofTaskType.setupJwt => 'Setup JWT',
-      ProofTaskType.setupShow => 'Setup Show',
       ProofTaskType.generateBlinds => 'Generate Shared Blinds',
       ProofTaskType.proveJwt => 'Prove JWT',
       ProofTaskType.proveShow => 'Prove Show',
@@ -591,17 +632,14 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
 
   bool get _step1Complete =>
       _prepareInputStatus != null && _showInputStatus != null;
-  bool get _step2Complete =>
-      _completedSteps['setupJwt'] == true &&
-      _completedSteps['setupShow'] == true;
-  bool get _step3Complete => _completedSteps['generateBlinds'] == true;
-  bool get _step4Complete =>
+  bool get _step2Complete => _completedSteps['generateBlinds'] == true;
+  bool get _step3Complete =>
       _completedSteps['proveJwt'] == true &&
       _completedSteps['reblindJwt'] == true;
-  bool get _step5Complete =>
+  bool get _step4Complete =>
       _completedSteps['proveShow'] == true &&
       _completedSteps['reblindShow'] == true;
-  bool get _step6Complete =>
+  bool get _step5Complete =>
       _completedSteps['verifyJwt'] == true &&
       _completedSteps['verifyShow'] == true;
 
@@ -640,39 +678,10 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
             _buildConnector(),
             _buildStep(
               step: 2,
-              title: 'Key Setup',
-              icon: Icons.key,
-              color: Colors.blue.shade700,
-              completed: _step2Complete,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _buildOperationButton(
-                      taskType: ProofTaskType.setupJwt,
-                      label: 'Setup JWT',
-                      icon: Icons.key,
-                      color: Colors.blue,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildOperationButton(
-                      taskType: ProofTaskType.setupShow,
-                      label: 'Setup Show',
-                      icon: Icons.key,
-                      color: Colors.blue,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            _buildConnector(),
-            _buildStep(
-              step: 3,
               title: 'Generate Shared Blinds',
               icon: Icons.shuffle,
               color: Colors.orange.shade700,
-              completed: _step3Complete,
+              completed: _step2Complete,
               child: _buildOperationButton(
                 taskType: ProofTaskType.generateBlinds,
                 label: 'Generate Shared Blinds',
@@ -682,11 +691,11 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
             ),
             _buildConnector(),
             _buildStep(
-              step: 4,
+              step: 3,
               title: 'JWT Proof',
               icon: Icons.assignment,
               color: Colors.green.shade700,
-              completed: _step4Complete,
+              completed: _step3Complete,
               child: Row(
                 children: [
                   Expanded(
@@ -711,11 +720,11 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
             ),
             _buildConnector(),
             _buildStep(
-              step: 5,
+              step: 4,
               title: 'Show Proof',
               icon: Icons.visibility,
               color: Colors.deepPurple.shade700,
-              completed: _step5Complete,
+              completed: _step4Complete,
               child: Row(
                 children: [
                   Expanded(
@@ -740,11 +749,11 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
             ),
             _buildConnector(),
             _buildStep(
-              step: 6,
+              step: 5,
               title: 'Verify Proofs',
               icon: Icons.check_circle,
               color: Colors.teal.shade700,
-              completed: _step6Complete,
+              completed: _step5Complete,
               child: Row(
                 children: [
                   Expanded(
@@ -887,19 +896,43 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
               ],
             ),
             const SizedBox(height: 10),
-            ElevatedButton.icon(
-              onPressed: _isOperating
-                  ? null
-                  : () => Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => const QrScannerScreen()),
-                      ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.all(14),
-              ),
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Scan QR Code'),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isOperating
+                        ? null
+                        : () => Navigator.of(context).push(
+                              MaterialPageRoute(builder: (_) => const QrScannerScreen()),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(14),
+                    ),
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan QR Code'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _isOperating
+                        ? null
+                        : () => launchUrl(
+                              Uri.parse(_kModaVpQrUrl),
+                              mode: LaunchMode.externalApplication,
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.deepPurple,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.all(14),
+                    ),
+                    icon: const Icon(Icons.wallet),
+                    label: const Text('MODA Wallet'),
+                  ),
+                ),
+              ],
             ),
             if (_workflowRunning && _currentWorkflowStep != null) ...[
               const SizedBox(height: 10),
@@ -1363,6 +1396,10 @@ class _E2EProofWorkflowScreenState extends State<E2EProofWorkflowScreen> {
   }
 }
 
+// ── MODA wallet VP QR URL (UAT) ──────────────────────────────────────────────
+const _kModaVpQrUrl =
+    'https://frontend-uat.wallet.gov.tw/api/moda/vpqrcode?mode=vp01&deeplink=bW9kYWRpZ2l0YWx3YWxsZXQ6Ly9hdXRob3JpemU/Y2xpZW50X2lkPWRpZCUzQWtleSUzQXoyZG16RDgxY2dQeDhWa2k3SmJ1dU1tRllyV1BnWW95dHlrVVozZXlxaHQxajlLYnBpazRRZmRUY1k0RFNabVZwNkZudHVjNm9GNmpxS1RLSDJublNZdUVZQ1NIdEhFeXZWNDRVWnc0TmNlRW5vdjJlWUw1ZWprcFZzVnk3Q2dGZjhZalgxVkpGNVNBR0ZBV3R4NlRpYmdwaEp0RDY0aDY3NHFIZ3hmUmFnRjZUeGpMblkmcmVxdWVzdF91cmk9aHR0cHMlM0ElMkYlMkZyZXF1ZXN0LWxvZy12aWV3ZXIudml2aTQzMjIyLndvcmtlcnMuZGV2JTJGdHdkaXctdWF0';
+
 // ── QR Scanner Screen ────────────────────────────────────────────────────────
 
 const _kVerifierBaseUrl = 'https://verifier-sandbox.wallet.gov.tw';
@@ -1450,6 +1487,24 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     try {
       final parsed = _parseQrPayload(raw);
       if (parsed == null) {
+        // Try as a MODA VP QR (vpqrcode with embedded request_uri).
+        final qrResult = _parseQrCodeUrl(raw);
+        if (qrResult.type == QrResultType.parseVP && qrResult.data != null) {
+          final deeplink = Uri.tryParse(qrResult.data!);
+          final requestUri = deeplink?.queryParameters['request_uri'];
+          if (requestUri != null) {
+            if (!mounted) return;
+            setState(() => _processing = false);
+            await Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => _OpenCredProofScreen(
+                walletDeeplink: qrResult.data!,
+                requestUri: requestUri,
+              ),
+            ));
+            if (mounted) await _controller.start();
+            return;
+          }
+        }
         throw Exception(
             'QR code does not contain ref and transactionId.\nGot: $raw');
       }
@@ -1859,6 +1914,491 @@ class _QrConfirmScreenState extends State<_QrConfirmScreen> {
               fontSize: 11,
               color: Colors.grey.shade700),
         ),
+      ],
+    );
+  }
+}
+
+// ── OpenCred Verifier → ZK Proof Screen ─────────────────────────────────────
+//
+// Flow:
+//   1. GET <poll_url>          → record current head ID (baseline)
+//   2. launchUrl walletDeeplink → wallet fetches auth-request, posts VP to verifier
+//   3. Poll <poll_url>?since=N → detect new POST whose body contains vp_token
+//   4. Decode VP JWT → vp.verifiableCredential[0] → base JWT (before first ~)
+//   5. generatePrepareInput(jwt, issuerPubkeyX, issuerPubkeyY) → write prepare_input.json
+//   6. Navigate back to main screen for the full proof pipeline
+
+class _OpenCredProofScreen extends StatefulWidget {
+  final String walletDeeplink; // modadigitalwallet://authorize?client_id=...&request_uri=...
+  final String requestUri;     // https://...workers.dev/twdiw-uat
+
+  const _OpenCredProofScreen({
+    required this.walletDeeplink,
+    required this.requestUri,
+  });
+
+  @override
+  State<_OpenCredProofScreen> createState() => _OpenCredProofScreenState();
+}
+
+enum _OcStep { init, ready, polling, extracting, preparing, done, error }
+
+class _OpenCredProofScreenState extends State<_OpenCredProofScreen> {
+  _OcStep _step = _OcStep.init;
+  int _baselineId = 0;
+  String? _vcJwt;
+  String? _prepareStatus;
+  String? _prepareError;
+  String? _error;
+  bool _disposed = false;
+
+  String get _pollUrl {
+    final uri = Uri.parse(widget.requestUri);
+    return uri.replace(path: '/poll').toString();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchBaseline();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
+  // ── Step 1: get current head so we only look at NEW entries ──────────────
+
+  Future<void> _fetchBaseline() async {
+    _setStep(_OcStep.init);
+    try {
+      final res = await http.get(Uri.parse(_pollUrl));
+      if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode} from poll endpoint');
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final head = (body['head'] as num?)?.toInt() ?? 0;
+      if (!_disposed) setState(() { _baselineId = head; _step = _OcStep.ready; });
+    } catch (e) {
+      _setError(e.toString());
+    }
+  }
+
+  // ── Step 2 + 3: launch wallet then poll until VP arrives ─────────────────
+
+  Future<void> _launchAndPoll() async {
+    try {
+      // Use the same launch path as _QrConfirmScreen (proven to open the wallet app).
+      // _launchInWallet decodes the URI and appends openac_callback; the wallet still
+      // posts the VP to response_uri, which we collect via polling.
+      await launchUrl(
+        Uri.parse(_kModaVpQrUrl),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (e) {
+      _setError('Failed to open wallet app: $e');
+      return;
+    }
+    _setStep(_OcStep.polling);
+    await _pollForVp();
+  }
+
+  Future<void> _pollForVp() async {
+    int sinceId = _baselineId;
+    const pollInterval = Duration(seconds: 2);
+    const maxAttempts = 90; // 3 minutes
+
+    for (int i = 0; i < maxAttempts && !_disposed; i++) {
+      await Future.delayed(pollInterval);
+      try {
+        final res = await http.get(Uri.parse('$_pollUrl?since=$sinceId'));
+        if (res.statusCode != 200) continue;
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final entries = (data['entries'] as List?) ?? [];
+        for (final e in entries) {
+          final id = (e['id'] as num?)?.toInt() ?? 0;
+          if (id > sinceId) sinceId = id;
+          final entryBody = e['data']?['body'] as String? ?? '';
+          if (entryBody.contains('vp_token')) {
+            final params = Uri.splitQueryString(entryBody);
+            final vpToken = params['vp_token'];
+            if (vpToken != null && vpToken.isNotEmpty) {
+              await _extractAndPrepare(vpToken);
+              return;
+            }
+          }
+        }
+      } catch (_) {
+        // transient network error; keep polling
+      }
+    }
+    if (!_disposed) _setError('Timed out waiting for VP from wallet (3 min)');
+  }
+
+  // ── Step 4 + 5: extract VC, run generatePrepareInput ────────────────────
+
+  Future<void> _extractAndPrepare(String vpToken) async {
+    _setStep(_OcStep.extracting);
+    try {
+      // Extract VP JWT signing input (header.payload) and device signature for show proof.
+      final vpParts = vpToken.split('.');
+      if (vpParts.length >= 3) {
+        _pendingVpSigningInput = '${vpParts[0]}.${vpParts[1]}';
+        // sig may be followed by ~disclosures~; strip those.
+        _pendingVpDeviceSig = vpParts[2].split('~')[0];
+        debugPrint('[VP] signing input length=${_pendingVpSigningInput!.length}  sig=${_pendingVpDeviceSig!.substring(0, 16)}…');
+      }
+
+      final vc = _extractVcJwt(vpToken);
+      if (vc == null) throw Exception('No verifiableCredential found in VP token');
+
+      final signingLen = '${vc.split('.')[0]}.${vc.split('.')[1]}'.length;
+      if (signingLen > 2048) {
+        throw Exception(
+          'VC signing input is $signingLen bytes — exceeds circuit MAX_MSG_LEN=2048.\n'
+          'This credential type is too large for the current 2k circuit.',
+        );
+      }
+
+      if (!_disposed) setState(() { _vcJwt = vc; _step = _OcStep.preparing; });
+
+      final dir = await getApplicationDocumentsDirectory();
+      final docs = dir.path;
+      final jsonStr = await generatePrepareInput(
+        jwt: vc,
+        issuerPubkeyX: _kIssuerPubkeyX,
+        issuerPubkeyY: _kIssuerPubkeyY,
+      );
+      await File('$docs/jwt_input.json').writeAsString(jsonStr);
+      final parsed = jsonDecode(jsonStr) as Map<String, dynamic>;
+
+      if (!_disposed) {
+        setState(() {
+          _prepareStatus =
+              'messageLength=${parsed['messageLength']}  '
+              'periodIndex=${parsed['periodIndex']}  '
+              'matchesCount=${parsed['matchesCount']}';
+          _step = _OcStep.done;
+        });
+      }
+    } catch (e) {
+      final msg = await _zkErrorMessage(e);
+      if (!_disposed) setState(() { _prepareError = msg; _step = _OcStep.error; });
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  // Decodes a VP JWT and returns the base JWT from the first verifiableCredential
+  // (the part before the first ~ in the sd-jwt).
+  String? _extractVcJwt(String vpToken) {
+    try {
+      final parts = vpToken.split('.');
+      if (parts.length < 2) return null;
+      final payload = parts[1];
+      final padded = payload.padRight(payload.length + (4 - payload.length % 4) % 4, '=');
+      final raw = base64.decode(padded.replaceAll('-', '+').replaceAll('_', '/'));
+      final decoded = utf8.decode(raw);
+      final json = jsonDecode(decoded) as Map<String, dynamic>;
+      final vcs = json['vp']?['verifiableCredential'] as List?;
+      if (vcs == null || vcs.isEmpty) return null;
+      final sdJwt = vcs[0] as String;
+      return sdJwt.split('~').first; // strip disclosures / KB-JWT
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _setStep(_OcStep s) { if (!_disposed) setState(() { _step = s; _error = null; }); }
+  void _setError(String e) { if (!_disposed) setState(() { _step = _OcStep.error; _error = e; }); }
+
+  // ── UI ───────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('OpenCred → ZK Proof')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildConnectionCard(),
+            const SizedBox(height: 12),
+            _buildPresentationCard(),
+            const SizedBox(height: 12),
+            _buildProofCard(),
+            const SizedBox(height: 20),
+            ..._buildActions(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnectionCard() {
+    final connected = _step != _OcStep.init && _step != _OcStep.error;
+    return _stepCard(
+      step: 1,
+      title: 'Verifier Connection',
+      icon: Icons.cloud_outlined,
+      color: Colors.blue,
+      done: connected,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _mono('request_uri', widget.requestUri),
+          const SizedBox(height: 6),
+          _mono('poll endpoint', _pollUrl),
+          if (_step == _OcStep.init) ...[
+            const SizedBox(height: 8),
+            const Row(children: [
+              SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: 8),
+              Text('Connecting to verifier…', style: TextStyle(fontSize: 12)),
+            ]),
+          ],
+          if (connected) ...[
+            const SizedBox(height: 6),
+            Row(children: [
+              Icon(Icons.check_circle, color: Colors.green.shade600, size: 14),
+              const SizedBox(width: 4),
+              Text('Baseline log ID: $_baselineId',
+                  style: TextStyle(fontSize: 11, color: Colors.green.shade700)),
+            ]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPresentationCard() {
+    final done = _step == _OcStep.extracting ||
+        _step == _OcStep.preparing ||
+        _step == _OcStep.done ||
+        (_step == _OcStep.error && _prepareError != null);
+    final polling = _step == _OcStep.polling;
+    return _stepCard(
+      step: 2,
+      title: 'Wallet Presentation',
+      icon: Icons.phone_android,
+      color: Colors.teal,
+      done: done,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_step == _OcStep.ready || _step == _OcStep.polling) ...[
+            Text(
+              'The wallet will present your credential to the verifier.\n'
+              'After presenting, the app polls for the VP token.',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+            ),
+          ],
+          if (polling) ...[
+            const SizedBox(height: 10),
+            Row(children: [
+              const SizedBox(width: 14, height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 8),
+              Text('Waiting for wallet to present credential…',
+                  style: TextStyle(fontSize: 12, color: Colors.teal.shade700)),
+            ]),
+          ],
+          if (done) ...[
+            const SizedBox(height: 6),
+            Row(children: [
+              Icon(Icons.check_circle, color: Colors.green.shade600, size: 14),
+              const SizedBox(width: 4),
+              const Text('VP token received', style: TextStyle(fontSize: 11)),
+            ]),
+            if (_vcJwt != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'VC signing input: ${_vcJwt!.split('.')[0].length + 1 + _vcJwt!.split('.')[1].length} bytes',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProofCard() {
+    return _stepCard(
+      step: 3,
+      title: 'Generate Prepare Input',
+      icon: Icons.input,
+      color: Colors.cyan.shade700,
+      done: _step == _OcStep.done,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_step == _OcStep.preparing) ...[
+            const Row(children: [
+              SizedBox(width: 14, height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              SizedBox(width: 8),
+              Text('Running generatePrepareInput…', style: TextStyle(fontSize: 12)),
+            ]),
+          ],
+          if (_step == _OcStep.done && _prepareStatus != null) ...[
+            Row(children: [
+              Icon(Icons.check_circle, color: Colors.green.shade600, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(_prepareStatus!,
+                    style: TextStyle(fontSize: 11, color: Colors.green.shade700,
+                        fontFamily: 'monospace')),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            Text(
+              'prepare_input.json written. Use the main screen to run the full\n'
+              'proof pipeline (Setup → Blinds → Prove JWT → Reblind → Verify).',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+          ],
+          if (_step == _OcStep.error && _prepareError != null) ...[
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Icon(Icons.error, color: Colors.red.shade600, size: 14),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(_prepareError!,
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700)),
+              ),
+            ]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildActions() {
+    final actions = <Widget>[];
+
+    if (_step == _OcStep.ready) {
+      actions.add(ElevatedButton.icon(
+        onPressed: _launchAndPoll,
+        icon: const Icon(Icons.verified_user_outlined),
+        label: const Text('Launch Wallet & Prove'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.indigo,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.all(16),
+        ),
+      ));
+    }
+
+    if (_step == _OcStep.error && _prepareError == null) {
+      // Connection/extraction error → retry from baseline
+      actions.add(ElevatedButton.icon(
+        onPressed: _fetchBaseline,
+        icon: const Icon(Icons.refresh),
+        label: const Text('Retry'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.orange,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.all(14),
+        ),
+      ));
+    }
+
+    if (_step == _OcStep.done) {
+      actions.add(ElevatedButton.icon(
+        onPressed: () => Navigator.of(context).popUntil((r) => r.isFirst),
+        icon: const Icon(Icons.play_circle_filled),
+        label: const Text('Go to Proof Pipeline'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.indigo,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.all(16),
+        ),
+      ));
+    }
+
+    if (_error != null) {
+      actions.add(Card(
+        color: Colors.red.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text('Error: $_error',
+              style: TextStyle(color: Colors.red.shade800, fontSize: 13)),
+        ),
+      ));
+    }
+
+    actions.add(const SizedBox(height: 8));
+    actions.add(OutlinedButton(
+      onPressed: () => Navigator.of(context).pop(),
+      child: const Text('Cancel'),
+    ));
+
+    return actions;
+  }
+
+  // ── Shared UI helpers ────────────────────────────────────────────────────
+
+  Widget _stepCard({
+    required int step,
+    required String title,
+    required IconData icon,
+    required Color color,
+    required bool done,
+    required Widget child,
+  }) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: done
+            ? BorderSide(color: color, width: 1.5)
+            : BorderSide(color: Colors.grey.shade200),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              CircleAvatar(
+                radius: 14,
+                backgroundColor: done ? color : Colors.grey.shade300,
+                child: Text('$step',
+                    style: TextStyle(
+                      color: done ? Colors.white : Colors.grey.shade600,
+                      fontSize: 12, fontWeight: FontWeight.bold,
+                    )),
+              ),
+              const SizedBox(width: 10),
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 8),
+              Text(title,
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold,
+                      color: Colors.grey.shade800)),
+              if (done) ...[
+                const Spacer(),
+                Icon(Icons.check_circle, color: color, size: 18),
+              ],
+            ]),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _mono(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        SelectableText(value,
+            style: TextStyle(fontFamily: 'monospace', fontSize: 10,
+                color: Colors.grey.shade700)),
       ],
     );
   }

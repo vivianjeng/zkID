@@ -87,8 +87,8 @@ Future<String> getCommWShared({
 /// Generate the Prepare (JWT) circuit input JSON for a `vc+sd-jwt` credential.
 ///
 /// Returns a JSON string ready to write to `prepare_input.json` and pass to
-/// [`prove_prepare`].  Circuit params are fixed at the **2k** variant:
-/// `maxMessageLength=2048`, `maxMatches=4`, `maxSubstringLength=50`,
+/// [`prove_prepare`].  Circuit params are fixed at the **4k** variant:
+/// `maxMessageLength=4096`, `maxMatches=4`, `maxSubstringLength=50`,
 /// `maxClaims=2`, `maxClaimLength=128`.
 ///
 /// Parameters:
@@ -108,7 +108,7 @@ Future<String> generatePrepareInput({
 /// Generate the Show circuit input JSON for a credential presentation.
 ///
 /// Returns a JSON string ready to write to `show_input.json` and pass to
-/// [`prove_show`].  Circuit params are fixed at the **2k** variant:
+/// [`prove_show`].  Circuit params are fixed at the **4k** variant:
 /// `nClaims=2`, `maxPredicates=2`, `maxLogicTokens=8`.
 ///
 /// Parameters:
@@ -158,7 +158,9 @@ Future<String> moproHelloWorld() =>
     RustLib.instance.api.openacMobileAppMoproHelloWorld();
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<ZkProofError>>
-abstract class ZkProofError implements RustOpaqueInterface {}
+abstract class ZkProofError implements RustOpaqueInterface {
+  Future<String> message();
+}
 
 /// Result of a complete benchmark run with timing and size metrics
 class BenchmarkResults {
